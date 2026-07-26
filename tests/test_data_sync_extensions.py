@@ -48,18 +48,16 @@ def test_data_syncer_has_sync_daily_and_compute_method():
     assert sig.parameters["days"].default == 730
 
 
-def test_data_syncer_init_requires_token_in_jnb_mode():
-    """JNB 模式下 DataSyncer __init__ 源码层面必须检查 TUSHARE_TOKEN / API URL（静态检查）"""
-    # 静态检查避免 conftest autouse fixture 与 monkeypatch 互踩
-    import inspect
+def test_data_syncer_init_no_token_required_in_jnb_mode(monkeypatch):
+    """JNB 模式缺少 TUSHARE_TOKEN / API URL 时，DataSyncer 默认回退 a-stock-data，不再抛错"""
     from modules.data_sync.syncer import DataSyncer
 
-    src = inspect.getsource(DataSyncer.__init__)
-    assert "DATA_MODE" in src
-    assert "TUSHARE_TOKEN" in src
-    assert "TUSHARE_API_URL" in src
-    # 必须显式 raise 结构化错误（ZettarancError 继承 ValueError）提示用户
-    assert "raise ZettarancError" in src
+    monkeypatch.setenv("DATA_MODE", "jnb")
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+    monkeypatch.delenv("TUSHARE_API_URL", raising=False)
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    syncer = DataSyncer()
+    assert syncer._datasource.name == "a-stock-data"
 
 
 # ==================== modules/report 新模块 ====================

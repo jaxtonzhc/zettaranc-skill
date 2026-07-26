@@ -128,44 +128,47 @@ def test_data_syncer_accepts_datasource_parameter(monkeypatch):
     assert syncer._fetcher.datasource is fake
 
 
-def test_data_syncer_default_datasource_is_tushare(monkeypatch):
-    """DataSyncer 默认 datasource 为 tushare"""
+def test_data_syncer_default_datasource_is_a_stock_data(monkeypatch):
+    """零配置（无 TUSHARE_TOKEN / INDEVS_API_KEY）时，DataSyncer 默认 datasource 为 a-stock-data（免费源）"""
     from modules.data_sync.syncer import DataSyncer
 
-    monkeypatch.setenv("DATA_MODE", "websearch")
-    syncer = DataSyncer(token="dummy")
-    assert syncer._datasource.name == "tushare"
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    syncer = DataSyncer()
+    assert syncer._datasource.name == "a-stock-data"
 
 
-def test_data_syncer_default_datasource_uses_explicit_token(monkeypatch):
-    """datasource 为 None 时，显式传入的 token 应交给 TushareDataSource"""
+def test_data_syncer_default_datasource_prefers_indevs(monkeypatch):
+    """同时配置 INDEVS_API_KEY 与 TUSHARE_TOKEN 时，默认数据源最优先 Indevs Replay API"""
     from modules.data_sync.syncer import DataSyncer
 
-    monkeypatch.setenv("DATA_MODE", "websearch")
-    captured = {}
+    monkeypatch.setenv("INDEVS_API_KEY", "dummy-key")
+    monkeypatch.setenv("TUSHARE_TOKEN", "dummy-token")
+    syncer = DataSyncer()
+    assert syncer._datasource.name == "indevs"
 
-    class MockTushareDataSource:
-        def __init__(self, token=None):
-            captured["token"] = token
 
-        @property
-        def name(self):
-            return "tushare"
+def test_data_syncer_default_datasource_prefers_tushare_when_token_env_set(monkeypatch):
+    """仅配置 TUSHARE_TOKEN 环境变量（无 INDEVS_API_KEY）时，默认数据源为 tushare（老用户行为不变）"""
+    from modules.datasource import TushareDataSource
+    from modules.data_sync.syncer import DataSyncer
 
-    monkeypatch.setattr("modules.data_sync.syncer.TushareDataSource", MockTushareDataSource)
-    syncer = DataSyncer(token="explicit-token")
-    assert captured["token"] == "explicit-token"
-    assert syncer._datasource.name == "tushare"
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    monkeypatch.setenv("TUSHARE_TOKEN", "env-token")
+    syncer = DataSyncer()
+    assert isinstance(syncer._datasource, TushareDataSource)
+    assert syncer._datasource._client.token == "env-token"
 
 
 def test_datasyncer_honors_token_argument(monkeypatch):
-    """TUSHARE_TOKEN 为空时，显式传入 token 仍应被用于构造 TushareDataSource"""
-    from modules.data_sync.syncer import DataSyncer
+    """显式传入 token 时，默认数据源为 TushareDataSource，且 token 透传到内部 TushareClient"""
     from modules.datasource import TushareDataSource
+    from modules.data_sync.syncer import DataSyncer
 
-    monkeypatch.setenv("DATA_MODE", "websearch")
-    monkeypatch.setenv("TUSHARE_TOKEN", "")
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
     ds = DataSyncer(token="explicit-token")
+    assert ds.token == "explicit-token"
     assert isinstance(ds._datasource, TushareDataSource)
     assert ds._datasource._client.token == "explicit-token"
 

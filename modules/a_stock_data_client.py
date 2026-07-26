@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import random
+import socket
 import time
 import urllib.request
 from datetime import datetime, timedelta
@@ -87,9 +88,12 @@ _EM_SESSION.headers.update({"User-Agent": _UA})
 try:
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
-    _em_adapter = HTTPAdapter(max_retries=Retry(
-        total=3, connect=3, backoff_factor=0.6,
-        status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"]))
+
+    _em_adapter = HTTPAdapter(
+        max_retries=Retry(
+            total=3, connect=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"]
+        )
+    )
     _EM_SESSION.mount("https://", _em_adapter)
     _EM_SESSION.mount("http://", _em_adapter)
 except Exception:
@@ -98,29 +102,48 @@ _EM_MIN_INTERVAL = 1.0
 _em_last_call = [0.0]
 
 
-def _em_get(url: str, params: dict | None = None, headers: dict | None = None,
-            timeout: int = 15, **kwargs) -> requests.Response:
-    """东财统一请求入口：自动节流 + 复用 session + 默认 UA。"""
+def _em_get(
+    url: str, params: dict | None = None, headers: dict | None = None, timeout: int = 15, **kwargs
+) -> requests.Response | None:
+    """东财统一请求入口：自动节流 + 复用 session + 默认 UA。
+
+    请求异常时返回 None（遵循项目约定：记录日志、返回 None 而非抛异常中断）。
+    """
     wait = _EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
     if wait > 0:
         time.sleep(wait + random.uniform(0.1, 0.5))
     try:
         return _EM_SESSION.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
+    except requests.RequestException as e:
+        logger.warning("[a-stock-data] 东财请求失败: %s", e)
+        return None
     finally:
         _em_last_call[0] = time.time()
 
 
-def _eastmoney_datacenter(report_name: str, columns: str = "ALL",
-                          filter_str: str = "", page_size: int = 50,
-                          sort_columns: str = "", sort_types: str = "-1") -> list[dict]:
+def _eastmoney_datacenter(
+    report_name: str,
+    columns: str = "ALL",
+    filter_str: str = "",
+    page_size: int = 50,
+    sort_columns: str = "",
+    sort_types: str = "-1",
+) -> list[dict]:
     """东财数据中心统一查询"""
     params = {
-        "reportName": report_name, "columns": columns,
-        "filter": filter_str, "pageNumber": "1", "pageSize": str(page_size),
-        "sortColumns": sort_columns, "sortTypes": sort_types,
-        "source": "WEB", "client": "WEB",
+        "reportName": report_name,
+        "columns": columns,
+        "filter": filter_str,
+        "pageNumber": "1",
+        "pageSize": str(page_size),
+        "sortColumns": sort_columns,
+        "sortTypes": sort_types,
+        "source": "WEB",
+        "client": "WEB",
     }
     r = _em_get(_DATACENTER_URL, params=params, timeout=15)
+    if r is None:
+        return []
     d = r.json()
     if d.get("result") and d["result"].get("data"):
         return d["result"]["data"]
@@ -191,10 +214,18 @@ def baidu_kline_with_ma(code: str, start_time: str = "") -> dict:
     """百度股市通K线，返回自带 ma5/ma10/ma20 均价"""
     url = "https://finance.pae.baidu.com/selfselect/getstockquotation"
     params = {
-        "all": "1", "isIndex": "false", "isBk": "false", "isBlock": "false",
-        "isFutures": "false", "isStock": "true", "newFormat": "1",
-        "group": "quotation_kline_ab", "finClientType": "pc",
-        "code": code, "start_time": start_time, "ktype": "1",
+        "all": "1",
+        "isIndex": "false",
+        "isBk": "false",
+        "isBlock": "false",
+        "isFutures": "false",
+        "isStock": "true",
+        "newFormat": "1",
+        "group": "quotation_kline_ab",
+        "finClientType": "pc",
+        "code": code,
+        "start_time": start_time,
+        "ktype": "1",
     }
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -265,7 +296,7 @@ def baidu_kline_to_dataframe(code: str, days: int = 60) -> pd.DataFrame | None:
     # 计算涨跌幅
     if "close" in df.columns:
         df["pct_chg"] = df["close"].pct_change() * 100
-        df["pct_chg"].iloc[0] = 0.0
+        df.loc[df.index[0], "pct_chg"] = 0.0
 
     # 日期格式化
     if "trade_date" in df.columns:
@@ -288,13 +319,20 @@ def eastmoney_stock_info(code: str) -> dict:
     market_code = _get_market_code(code)
     url = "https://push2.eastmoney.com/api/qt/stock/get"
     params = {
-        "fltt": "2", "invt": "2",
+        "fltt": "2",
+        "invt": "2",
         "fields": "f57,f58,f84,f85,f127,f116,f117,f189,f43",
         "secid": f"{market_code}.{code}",
     }
     headers = {"User-Agent": _UA}
     r = _em_get(url, params=params, headers=headers, timeout=10)
-    d = r.json().get("data", {})
+    if r is None:
+        return {}
+    try:
+        d = (r.json() or {}).get("data") or {}
+    except ValueError:
+        logger.warning("[a-stock-data] 个股信息 JSON 解析失败")
+        return {}
     return {
         "code": d.get("f57", ""),
         "name": d.get("f58", ""),
@@ -318,7 +356,8 @@ def eastmoney_fund_flow_minute(code: str) -> list[dict]:
     secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
     url = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
     params = {
-        "secid": secid, "klt": 1,
+        "secid": secid,
+        "klt": 1,
         "fields1": "f1,f2,f3,f7",
         "fields2": "f51,f52,f53,f54,f55,f56,f57",
     }
@@ -338,14 +377,16 @@ def eastmoney_fund_flow_minute(code: str) -> list[dict]:
     for line in d.get("data", {}).get("klines", []):
         parts = line.split(",")
         if len(parts) >= 6:
-            rows.append({
-                "time": parts[0],
-                "main_net": float(parts[1]),
-                "small_net": float(parts[2]),
-                "mid_net": float(parts[3]),
-                "large_net": float(parts[4]),
-                "super_net": float(parts[5]),
-            })
+            rows.append(
+                {
+                    "time": parts[0],
+                    "main_net": float(parts[1]),
+                    "small_net": float(parts[2]),
+                    "mid_net": float(parts[3]),
+                    "large_net": float(parts[4]),
+                    "super_net": float(parts[5]),
+                }
+            )
     return rows
 
 
@@ -354,7 +395,8 @@ def stock_fund_flow_120d(code: str) -> list[dict]:
     secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
     url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
     params = {
-        "secid": secid, "klt": 101,
+        "secid": secid,
+        "klt": 101,
         "fields1": "f1,f2,f3,f7",
         "fields2": "f51,f52,f53,f54,f55,f56,f57",
         "lmt": "120",
@@ -374,14 +416,16 @@ def stock_fund_flow_120d(code: str) -> list[dict]:
     for line in d.get("data", {}).get("klines", []):
         parts = line.split(",")
         if len(parts) >= 6:
-            rows.append({
-                "date": parts[0],
-                "super_net": float(parts[1]),
-                "large_net": float(parts[2]),
-                "mid_net": float(parts[3]),
-                "small_net": float(parts[4]),
-                "main_net": float(parts[5]),
-            })
+            rows.append(
+                {
+                    "date": parts[0],
+                    "super_net": float(parts[1]),
+                    "large_net": float(parts[2]),
+                    "mid_net": float(parts[3]),
+                    "small_net": float(parts[4]),
+                    "main_net": float(parts[5]),
+                }
+            )
     return rows
 
 
@@ -403,9 +447,14 @@ def _mootdx_kline(code: str, days: int = 60, frequency: int = 9) -> pd.DataFrame
 
     # 备选服务器列表（按延迟排序）
     _TDX_SERVERS = [
-        ('119.97.185.59', 7709), ('124.70.133.119', 7709), ('116.205.183.150', 7709),
-        ('123.60.73.44', 7709),  ('116.205.163.254', 7709), ('121.36.225.169', 7709),
-        ('123.60.70.228', 7709), ('124.71.9.153', 7709),
+        ("119.97.185.59", 7709),
+        ("124.70.133.119", 7709),
+        ("116.205.183.150", 7709),
+        ("123.60.73.44", 7709),
+        ("116.205.163.254", 7709),
+        ("121.36.225.169", 7709),
+        ("123.60.70.228", 7709),
+        ("124.71.9.153", 7709),
     ]
 
     def _probe(ip, port, timeout=2.0):
@@ -419,13 +468,13 @@ def _mootdx_kline(code: str, days: int = 60, frequency: int = 9) -> pd.DataFrame
         client = None
         for ip, port in _TDX_SERVERS:
             if _probe(ip, port):
-                client = Quotes.factory(market='std', server=(ip, port))
+                client = Quotes.factory(market="std", server=(ip, port))
                 break
         if client is None:
             try:
-                client = Quotes.factory(market='std', bestip=True)
+                client = Quotes.factory(market="std", bestip=True)
             except Exception:
-                client = Quotes.factory(market='std')
+                client = Quotes.factory(market="std")
 
         bars = client.bars(symbol=code, frequency=frequency, offset=days)
         if bars is None or bars.empty:
@@ -436,14 +485,14 @@ def _mootdx_kline(code: str, days: int = 60, frequency: int = 9) -> pd.DataFrame
         col_map = {"datetime": "trade_date"}
         df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
 
-        # 日期格式化
+        # 日期格式化（先按字符串去横杠，再按字符截取前 8 位）
         if "trade_date" in df.columns:
-            df["trade_date"] = df["trade_date"].astype(str).str.replace("-", "")[:8]
+            df["trade_date"] = df["trade_date"].astype(str).str.replace("-", "").str[:8]
 
         # 计算涨跌幅
         if "close" in df.columns and "pct_chg" not in df.columns:
             df["pct_chg"] = df["close"].pct_change() * 100
-            df["pct_chg"].iloc[0] = 0.0
+            df.loc[df.index[0], "pct_chg"] = 0.0
 
         return df
     except Exception as e:
@@ -570,23 +619,25 @@ class AStockDataClient:
             rows = []
             for code_6, q in quotes.items():
                 ts_code = _6digit_to_ts_code(code_6)
-                rows.append({
-                    "ts_code": ts_code,
-                    "name": q.get("name", ""),
-                    "price": q.get("price", 0),
-                    "open": q.get("open", 0),
-                    "high": q.get("high", 0),
-                    "low": q.get("low", 0),
-                    "last_close": q.get("last_close", 0),
-                    "change_pct": q.get("change_pct", 0),
-                    "vol": q.get("amount_wan", 0) * 10000,
-                    "amount": q.get("amount_wan", 0) * 10000,
-                    "pe_ttm": q.get("pe_ttm", 0),
-                    "pb": q.get("pb", 0),
-                    "total_mv": q.get("mcap_yi", 0) * 1e8,
-                    "circ_mv": q.get("float_mcap_yi", 0) * 1e8,
-                    "turnover_rate": q.get("turnover_pct", 0),
-                })
+                rows.append(
+                    {
+                        "ts_code": ts_code,
+                        "name": q.get("name", ""),
+                        "price": q.get("price", 0),
+                        "open": q.get("open", 0),
+                        "high": q.get("high", 0),
+                        "low": q.get("low", 0),
+                        "last_close": q.get("last_close", 0),
+                        "change_pct": q.get("change_pct", 0),
+                        "vol": q.get("amount_wan", 0) * 10000,
+                        "amount": q.get("amount_wan", 0) * 10000,
+                        "pe_ttm": q.get("pe_ttm", 0),
+                        "pb": q.get("pb", 0),
+                        "total_mv": q.get("mcap_yi", 0) * 1e8,
+                        "circ_mv": q.get("float_mcap_yi", 0) * 1e8,
+                        "turnover_rate": q.get("turnover_pct", 0),
+                    }
+                )
             return pd.DataFrame(rows)
         except Exception as e:
             logger.warning("[a-stock-data] get_realtime_quote 失败: %s", e)
@@ -607,19 +658,23 @@ class AStockDataClient:
             total_large = sum(r["large_net"] for r in rows)
             total_mid = sum(r["mid_net"] for r in rows)
             total_small = sum(r["small_net"] for r in rows)
-            df = pd.DataFrame([{
-                "ts_code": ts_code,
-                "trade_date": trade_date,
-                "buy_sm_vol": total_small,
-                "buy_med_vol": total_mid,
-                "buy_lg_vol": total_large,
-                "buy_elg_vol": total_super,
-                "sell_sm_vol": 0,
-                "sell_med_vol": 0,
-                "sell_lg_vol": 0,
-                "sell_elg_vol": 0,
-                "net_mf_amount": total_main,
-            }])
+            df = pd.DataFrame(
+                [
+                    {
+                        "ts_code": ts_code,
+                        "trade_date": trade_date,
+                        "buy_sm_vol": total_small,
+                        "buy_med_vol": total_mid,
+                        "buy_lg_vol": total_large,
+                        "buy_elg_vol": total_super,
+                        "sell_sm_vol": 0,
+                        "sell_med_vol": 0,
+                        "sell_lg_vol": 0,
+                        "sell_elg_vol": 0,
+                        "net_mf_amount": total_main,
+                    }
+                ]
+            )
             return df
         except Exception as e:
             logger.warning("[a-stock-data] get_moneyflow 失败 %s: %s", ts_code, e)
@@ -641,16 +696,20 @@ class AStockDataClient:
             q = quotes.get(code)
             if not q:
                 return None
-            df = pd.DataFrame([{
-                "ts_code": ts_code,
-                "trade_date": datetime.now().strftime("%Y%m%d"),
-                "turnover_rate": q.get("turnover_pct", 0),
-                "pe": q.get("pe_static", 0),
-                "pe_ttm": q.get("pe_ttm", 0),
-                "pb": q.get("pb", 0),
-                "total_mv": q.get("mcap_yi", 0) * 1e8,
-                "circ_mv": q.get("float_mcap_yi", 0) * 1e8,
-            }])
+            df = pd.DataFrame(
+                [
+                    {
+                        "ts_code": ts_code,
+                        "trade_date": datetime.now().strftime("%Y%m%d"),
+                        "turnover_rate": q.get("turnover_pct", 0),
+                        "pe": q.get("pe_static", 0),
+                        "pe_ttm": q.get("pe_ttm", 0),
+                        "pb": q.get("pb", 0),
+                        "total_mv": q.get("mcap_yi", 0) * 1e8,
+                        "circ_mv": q.get("float_mcap_yi", 0) * 1e8,
+                    }
+                ]
+            )
             return df
         except Exception as e:
             logger.warning("[a-stock-data] get_daily_basic 失败 %s: %s", ts_code, e)
@@ -678,21 +737,25 @@ class AStockDataClient:
             self._rate_limit()
             try:
                 info = eastmoney_stock_info(code)
-                df = pd.DataFrame([{
-                    "ts_code": ts_code,
-                    "name": info.get("name", ""),
-                    "industry": info.get("industry", ""),
-                    "market": "主板" if code.startswith("6") else (
-                        "创业板" if code.startswith("3") else (
-                            "科创板" if code.startswith("688") else "其他"
-                        )
-                    ),
-                    "list_date": info.get("list_date", ""),
-                    "total_share": info.get("total_shares", 0),
-                    "float_share": info.get("float_shares", 0),
-                    "total_mv": info.get("mcap", 0),
-                    "float_mv": info.get("float_mcap", 0),
-                }])
+                df = pd.DataFrame(
+                    [
+                        {
+                            "ts_code": ts_code,
+                            "name": info.get("name", ""),
+                            "industry": info.get("industry", ""),
+                            "market": "主板"
+                            if code.startswith("6")
+                            else (
+                                "创业板" if code.startswith("3") else ("科创板" if code.startswith("688") else "其他")
+                            ),
+                            "list_date": info.get("list_date", ""),
+                            "total_share": info.get("total_shares", 0),
+                            "float_share": info.get("float_shares", 0),
+                            "total_mv": info.get("mcap", 0),
+                            "float_mv": info.get("float_mcap", 0),
+                        }
+                    ]
+                )
                 return df
             except Exception as e:
                 logger.warning("[a-stock-data] get_stock_basic 失败 %s: %s", ts_code, e)
@@ -730,15 +793,17 @@ class AStockDataClient:
             records = records[-days:]
         result = []
         for rec in records:
-            result.append({
-                "ts_code": rec.get("ts_code", ts_code),
-                "trade_date": rec.get("trade_date", ""),
-                "open": float(rec.get("open", 0)),
-                "high": float(rec.get("high", 0)),
-                "low": float(rec.get("low", 0)),
-                "close": float(rec.get("close", 0)),
-                "vol": float(rec.get("vol", 0)),
-                "amount": float(rec.get("amount", 0)),
-                "pct_chg": float(rec.get("pct_chg", 0)),
-            })
+            result.append(
+                {
+                    "ts_code": rec.get("ts_code", ts_code),
+                    "trade_date": rec.get("trade_date", ""),
+                    "open": float(rec.get("open", 0)),
+                    "high": float(rec.get("high", 0)),
+                    "low": float(rec.get("low", 0)),
+                    "close": float(rec.get("close", 0)),
+                    "vol": float(rec.get("vol", 0)),
+                    "amount": float(rec.get("amount", 0)),
+                    "pct_chg": float(rec.get("pct_chg", 0)),
+                }
+            )
         return result

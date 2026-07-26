@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from ..database import get_connection, get_db_path
-from ..datasource import DataSource, IndevsDataSource, TushareDataSource, AStockDataDataSource, get_datasource
+from ..datasource import AStockDataDataSource, DataSource, IndevsDataSource, TushareDataSource
 from .rate_limiter import _rate_limit_global, _MAX_SYNC_WORKERS
 from .indicator_cache import (
     _get_indicator_funcs,
@@ -21,7 +21,6 @@ from .indicator_cache import (
     _INDICATOR_INSERT_COLUMNS,
 )
 from .fetcher import DataFetcher
-from modules.core.errors import ErrorCode, ZettarancError
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +40,16 @@ class DataSyncer:
     def __init__(self, token: str | None = None, datasource: DataSource | None = None) -> None:
         self.token = token or os.environ.get("TUSHARE_TOKEN")
 
-        # 依赖注入 DataSource；默认按环境变量选择数据源
+        # 依赖注入 DataSource；默认按环境变量选择数据源（token 感知）
         if datasource is None:
-            data_mode = os.getenv("DATA_MODE", "websearch")
             # 优先 Indevs Replay API
             if os.environ.get("INDEVS_API_KEY"):
                 datasource = IndevsDataSource()
+            elif self.token:
+                # 配置了 TUSHARE_TOKEN（或显式传入 token）：保持 tushare 数据源，老用户行为不变
+                datasource = TushareDataSource(token=self.token)
             else:
-                # 默认使用 a-stock-data（免费，无需 API Key）
+                # 零配置默认 a-stock-data（免费，无需 API Key）
                 datasource = AStockDataDataSource()
         self._datasource = datasource
         self._fetcher = DataFetcher(self._datasource)

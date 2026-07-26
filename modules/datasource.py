@@ -524,10 +524,13 @@ class SqliteDataSource:
 class CompositeDataSource:
     """组合数据源：按配置优先级自动回退。
 
-    默认优先级（preferred="auto"）：
-      a-stock-data（免费） -> indevs -> bridge -> SQLite
+    默认优先级（preferred="auto"），按环境变量 token 感知：
+      - 配置了 INDEVS_API_KEY -> indevs 最优先
+      - 否则配置了 TUSHARE_TOKEN -> tushare 优先
+      - 然后 a-stock-data（免费）-> bridge -> SQLite 依次兜底
 
-    a-stock-data 无需任何 API Key，使用腾讯/百度/东财等免费公开接口。
+    即：零配置新用户默认 a-stock-data（腾讯/百度/东财等免费公开接口，无需 API Key）；
+    已配置 token 的老用户行为不变，不会被静默切换到免费源。
     """
 
     VALID_PREFERRED = ("auto", "tushare", "indevs", "bridge", "sqlite", "a-stock-data")
@@ -563,6 +566,40 @@ class CompositeDataSource:
             self._a_stock_data = AStockDataDataSource()
         return self._a_stock_data
 
+    def _preferred_token_source(self) -> DataSource | None:
+        """按环境变量返回 auto 模式的优先数据源。
+
+        配置了 INDEVS_API_KEY 时用 indevs；否则配置了 TUSHARE_TOKEN 时用 tushare；
+        零配置返回 None（由调用方回退 a-stock-data）。
+        """
+        if os.environ.get("INDEVS_API_KEY"):
+            return self._indevs_source
+        if os.environ.get("TUSHARE_TOKEN"):
+            return self._tushare_source
+        return None
+
+    def _auto_sources(self) -> list[DataSource]:
+        """auto 模式的完整优先级链：优先源（如有）-> a-stock-data -> bridge -> sqlite。"""
+        sources: list[DataSource] = []
+        preferred = self._preferred_token_source()
+        if preferred is not None:
+            sources.append(preferred)
+        sources.extend([self._a_stock_data_source, self._bridge, self._sqlite])
+        return sources
+
+    def _auto_call(self, method: str, *args):
+        """auto 模式按优先级调用单项接口：先优先源（如有），失败后回退 a-stock-data。
+
+        返回首个非 None 结果；均失败时返回 None。
+        """
+        for source in (self._preferred_token_source(), self._a_stock_data_source):
+            if source is None:
+                continue
+            result = getattr(source, method)(*args)
+            if result is not None:
+                return result
+        return None
+
     @property
     def name(self) -> str:
         """数据源标识名（tushare / bridge / sqlite / indevs / composite 之一）"""
@@ -580,26 +617,16 @@ class CompositeDataSource:
             return self._indevs_source.health_check()
         if self._preferred == "a-stock-data":
             return self._a_stock_data_source.health_check()
-        # auto: a-stock-data -> indevs -> bridge -> sqlite
-        return (
-            self._a_stock_data_source.health_check()
-            or self._indevs_source.health_check()
-            or self._bridge.health_check()
-            or self._sqlite.health_check()
-        )
+        # auto: 按 token 感知优先级链依次探测（indevs/tushare -> a-stock-data -> bridge -> sqlite）
+        return any(source.health_check() for source in self._auto_sources())
 
     def get_daily(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
         """获取个股日线行情（OHLCV + 涨跌幅）"""
         if self._preferred == "a-stock-data":
             return self._a_stock_data_source.get_daily(ts_code, start_date, end_date)
         if self._preferred == "auto":
-            # auto 模式：优先 a-stock-data（免费），回退 indevs
-            result = self._a_stock_data_source.get_daily(ts_code, start_date, end_date)
-            if result is not None:
-                return result
-            if os.environ.get("INDEVS_API_KEY"):
-                return self._indevs_source.get_daily(ts_code, start_date, end_date)
-            return None
+            # auto 模式：优先源（indevs/tushare，token 感知）-> a-stock-data 兜底
+            return self._auto_call("get_daily", ts_code, start_date, end_date)
         if self._preferred in ("tushare", "indevs"):
             return self._indevs_source.get_daily(ts_code, start_date, end_date)
         return None
@@ -609,12 +636,7 @@ class CompositeDataSource:
         if self._preferred == "a-stock-data":
             return self._a_stock_data_source.get_index_daily(ts_code, start_date, end_date)
         if self._preferred == "auto":
-            result = self._a_stock_data_source.get_index_daily(ts_code, start_date, end_date)
-            if result is not None:
-                return result
-            if os.environ.get("INDEVS_API_KEY"):
-                return self._indevs_source.get_index_daily(ts_code, start_date, end_date)
-            return None
+            return self._auto_call("get_index_daily", ts_code, start_date, end_date)
         if self._preferred in ("tushare", "indevs"):
             return self._indevs_source.get_index_daily(ts_code, start_date, end_date)
         return None
@@ -624,12 +646,7 @@ class CompositeDataSource:
         if self._preferred == "a-stock-data":
             return self._a_stock_data_source.get_realtime_quote(ts_codes)
         if self._preferred == "auto":
-            result = self._a_stock_data_source.get_realtime_quote(ts_codes)
-            if result is not None:
-                return result
-            if os.environ.get("INDEVS_API_KEY"):
-                return self._indevs_source.get_realtime_quote(ts_codes)
-            return None
+            return self._auto_call("get_realtime_quote", ts_codes)
         if self._preferred in ("tushare", "indevs"):
             return self._indevs_source.get_realtime_quote(ts_codes)
         return None
@@ -639,12 +656,7 @@ class CompositeDataSource:
         if self._preferred == "a-stock-data":
             return self._a_stock_data_source.get_moneyflow(ts_code, trade_date)
         if self._preferred == "auto":
-            result = self._a_stock_data_source.get_moneyflow(ts_code, trade_date)
-            if result is not None:
-                return result
-            if os.environ.get("INDEVS_API_KEY"):
-                return self._indevs_source.get_moneyflow(ts_code, trade_date)
-            return None
+            return self._auto_call("get_moneyflow", ts_code, trade_date)
         if self._preferred in ("tushare", "indevs"):
             return self._indevs_source.get_moneyflow(ts_code, trade_date)
         return None
@@ -654,12 +666,7 @@ class CompositeDataSource:
         if self._preferred == "a-stock-data":
             return self._a_stock_data_source.get_daily_basic(ts_code, start_date, end_date)
         if self._preferred == "auto":
-            result = self._a_stock_data_source.get_daily_basic(ts_code, start_date, end_date)
-            if result is not None:
-                return result
-            if os.environ.get("INDEVS_API_KEY"):
-                return self._indevs_source.get_daily_basic(ts_code, start_date, end_date)
-            return None
+            return self._auto_call("get_daily_basic", ts_code, start_date, end_date)
         if self._preferred in ("tushare", "indevs"):
             return self._indevs_source.get_daily_basic(ts_code, start_date, end_date)
         return None
@@ -669,9 +676,8 @@ class CompositeDataSource:
         if self._preferred == "a-stock-data":
             return None  # a-stock-data 不支持
         if self._preferred == "auto":
-            if os.environ.get("INDEVS_API_KEY"):
-                return self._indevs_source.get_stk_factor(ts_code, start_date, end_date)
-            return None
+            # a-stock-data 不支持该接口，_auto_call 回退后仍返回 None
+            return self._auto_call("get_stk_factor", ts_code, start_date, end_date)
         if self._preferred in ("tushare", "indevs"):
             return self._indevs_source.get_stk_factor(ts_code, start_date, end_date)
         return None
@@ -681,12 +687,7 @@ class CompositeDataSource:
         if self._preferred == "a-stock-data":
             return self._a_stock_data_source.get_stock_basic(ts_code, name)
         if self._preferred == "auto":
-            result = self._a_stock_data_source.get_stock_basic(ts_code, name)
-            if result is not None:
-                return result
-            if os.environ.get("INDEVS_API_KEY"):
-                return self._indevs_source.get_stock_basic(ts_code, name)
-            return None
+            return self._auto_call("get_stock_basic", ts_code, name)
         if self._preferred in ("tushare", "indevs"):
             return self._indevs_source.get_stock_basic(ts_code, name)
         return None
@@ -696,9 +697,8 @@ class CompositeDataSource:
         if self._preferred == "a-stock-data":
             return None  # a-stock-data 不支持
         if self._preferred == "auto":
-            if os.environ.get("INDEVS_API_KEY"):
-                return self._indevs_source.get_trade_cal(exchange, start_date, end_date)
-            return None
+            # a-stock-data 不支持该接口，_auto_call 回退后仍返回 None
+            return self._auto_call("get_trade_cal", exchange, start_date, end_date)
         if self._preferred in ("tushare", "indevs"):
             return self._indevs_source.get_trade_cal(exchange, start_date, end_date)
         return None
@@ -707,7 +707,7 @@ class CompositeDataSource:
         """获取股票列表（按交易所）"""
         sources: list[DataSource] = []
         if self._preferred == "auto":
-            sources = [self._a_stock_data_source, self._indevs_source, self._bridge, self._sqlite]
+            sources = self._auto_sources()
         elif self._preferred == "a-stock-data":
             sources = [self._a_stock_data_source, self._indevs_source, self._bridge, self._sqlite]
         elif self._preferred == "bridge":
@@ -788,7 +788,7 @@ class CompositeDataSource:
         # 2. DB 没有数据，调 API
         sources: list[DataSource] = []
         if self._preferred == "auto":
-            sources = [self._a_stock_data_source, self._indevs_source, self._bridge, self._sqlite]
+            sources = self._auto_sources()
         elif self._preferred == "a-stock-data":
             sources = [self._a_stock_data_source, self._indevs_source, self._bridge, self._sqlite]
         elif self._preferred == "bridge":
@@ -933,8 +933,9 @@ def daily_to_dict(klines: list) -> list[dict]:
 def get_datasource(preferred: str = "auto") -> DataSource:
     """数据源工厂函数。
 
-    preferred="auto" 时默认使用 CompositeDataSource，优先级为：
-    a-stock-data（免费）-> indevs -> bridge -> sqlite
+    preferred="auto" 时默认使用 CompositeDataSource，优先级（token 感知）：
+    indevs（配置 INDEVS_API_KEY）-> tushare（配置 TUSHARE_TOKEN）
+    -> a-stock-data（免费）-> bridge -> sqlite
     """
     if preferred == "tushare":
         return TushareDataSource()

@@ -7,9 +7,11 @@ import pytest
 
 from modules.bridge_client import BridgeConfig, get_bridge_config, is_bridge_available
 from modules.datasource import (
+    AStockDataDataSource,
     BridgeDataSource,
     CompositeDataSource,
     DataSource,
+    IndevsDataSource,
     SqliteDataSource,
     TushareDataSource,
     get_datasource,
@@ -251,3 +253,65 @@ def test_composite_auto_does_not_eagerly_construct_tushare(monkeypatch):
     assert composite._tushare is None
     result = composite.health_check()
     assert isinstance(result, bool)
+
+
+def test_composite_auto_prefers_a_stock_data_without_config(monkeypatch):
+    """零配置（无 TUSHARE_TOKEN / INDEVS_API_KEY）时 auto 模式首选 a-stock-data。"""
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    sentinel = pd.DataFrame([{"close": 1.0}])
+
+    monkeypatch.setattr(AStockDataDataSource, "get_daily", lambda self, *a, **k: sentinel)
+    monkeypatch.setattr(TushareDataSource, "get_daily", lambda self, *a, **k: pytest.fail("零配置不应调用 tushare"))
+    monkeypatch.setattr(IndevsDataSource, "get_daily", lambda self, *a, **k: pytest.fail("零配置不应调用 indevs"))
+
+    ds = CompositeDataSource("auto")
+    assert ds.get_daily("600519.SH", "20260101", "20260102") is sentinel
+    # 零配置不应构造 tushare / indevs 源
+    assert ds._tushare is None
+    assert ds._indevs is None
+
+
+def test_composite_auto_prefers_tushare_when_token_set(monkeypatch):
+    """配置 TUSHARE_TOKEN（无 INDEVS_API_KEY）时 auto 模式优先 tushare。"""
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    monkeypatch.setenv("TUSHARE_TOKEN", "dummy-token")
+    sentinel = pd.DataFrame([{"close": 1.0}])
+
+    monkeypatch.setattr(TushareDataSource, "get_daily", lambda self, *a, **k: sentinel)
+    monkeypatch.setattr(
+        AStockDataDataSource,
+        "get_daily",
+        lambda self, *a, **k: pytest.fail("tushare 成功时不应回退 a-stock-data"),
+    )
+
+    ds = CompositeDataSource("auto")
+    assert ds.get_daily("600519.SH", "20260101", "20260102") is sentinel
+
+
+def test_composite_auto_prefers_indevs_over_tushare(monkeypatch):
+    """同时配置 INDEVS_API_KEY 与 TUSHARE_TOKEN 时 auto 模式最优先 indevs。"""
+    monkeypatch.setenv("INDEVS_API_KEY", "dummy-key")
+    monkeypatch.setenv("TUSHARE_TOKEN", "dummy-token")
+    sentinel = pd.DataFrame([{"close": 1.0}])
+
+    monkeypatch.setattr(IndevsDataSource, "get_daily", lambda self, *a, **k: sentinel)
+    monkeypatch.setattr(
+        TushareDataSource, "get_daily", lambda self, *a, **k: pytest.fail("indevs 优先，不应调用 tushare")
+    )
+
+    ds = CompositeDataSource("auto")
+    assert ds.get_daily("600519.SH", "20260101", "20260102") is sentinel
+
+
+def test_composite_auto_falls_back_to_a_stock_data_when_tushare_returns_none(monkeypatch):
+    """tushare 无数据（返回 None）时 auto 模式回退 a-stock-data。"""
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    monkeypatch.setenv("TUSHARE_TOKEN", "dummy-token")
+    sentinel = pd.DataFrame([{"close": 1.0}])
+
+    monkeypatch.setattr(TushareDataSource, "get_daily", lambda self, *a, **k: None)
+    monkeypatch.setattr(AStockDataDataSource, "get_daily", lambda self, *a, **k: sentinel)
+
+    ds = CompositeDataSource("auto")
+    assert ds.get_daily("600519.SH", "20260101", "20260102") is sentinel
