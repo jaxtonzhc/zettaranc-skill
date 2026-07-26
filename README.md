@@ -6,9 +6,9 @@
 基于 ~200 万字语料蒸馏，60+ 指标，30+ 战法，可回测可模拟、可自改进、可走完整闭环。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-4.0.3-green)](docs/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-4.1.0-green)](docs/CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-1179%20passed%20%7C%2015%20skipped-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1383%20passed%20%7C%2016%20skipped-brightgreen)](tests/)
 [![Quality Gate](https://img.shields.io/badge/quality-12%2F12-blue)](corpus/quality_check.py)
 [![Skill](https://img.shields.io/badge/Skill--Schema--V2-✓-purple)](SKILL.md)
 
@@ -200,7 +200,8 @@ python3 -m scripts.optimize_for_v10_verify --rounds 5 --stocks 100 --days 300
 
 ## 完整安装（接入真实行情）
 
-> 需要 [Tushare Pro](https://tushare.pro/) Token（免费注册）+ 中转 API 地址。
+> 需要 [Tushare Pro](https://tushare.pro/) Token（免费注册）+ 中转 API 地址（数据最全）。  
+> 不想配置 Token？v4.1.0 起内置 a-stock-data 免费数据源（腾讯/百度/东财/通达信），零配置即可获取实时行情与 K 线，跳过第 2 步也能直接用。
 
 ```bash
 # 1. 克隆并安装
@@ -656,7 +657,7 @@ TUSHARE_API_URL=中转API地址
 ```
 
 > [!NOTE]
-> * **数据模式**：`DATA_MODE=jnb` 时必须配置 Tushare Token 和 API URL；`DATA_MODE=websearch` 时可留空。
+> * **数据模式**：`DATA_MODE=jnb` 时配置 Tushare Token 和 API URL 数据最全；未配置时自动走 a-stock-data 免费源（v4.1.0 新增）；`DATA_MODE=websearch` 时可留空。
 > * **Token 获取**：前往 [Tushare 官网](https://tushare.pro/user/token) 注册获取 Token。
 > * **中转 API**：可使用中转服务商提供的代理地址。
 > * **LLM 配置**：可选。配置 `LLM_API_KEY` 等参数后可启用小万 LLM 对话及点评功能；未配置时将仅输出命令行分析及意图路由。
@@ -679,7 +680,7 @@ python -m modules.data_sync sync --ts_code 600487.SH --days 120 --indicators
 ### 4. 验证
 
 ```bash
-# 运行测试（892 passed, 11 skipped，共 903 用例 / 52 测试文件）
+# 运行测试（1383 passed, 16 skipped，100 个测试文件）
 python -m pytest tests/ -v
 
 # 分析一只股票
@@ -705,10 +706,12 @@ python -m modules.cli simulate 000001.SZ --days 250 --atr-sizing --json
 
 | 优先级 | 数据来源 | 需要的配置 | 说明 |
 |--------|---------|-----------|------|
-| 1. Tushare Pro | `TUSHARE_TOKEN` + `TUSHARE_API_URL` | 实时行情、财务数据、资金流向 | 最佳，数据最全 |
-| 2. tushare-data-bridge | `TUSHARE_BRIDGE_ENABLED=auto/always` | HTTP 代理缓存的数据 | Tushare 直连受限时自动回退 |
-| 3. 本地 SQLite | 已执行过 `python -m modules.data_sync sync` | `data/stock_data.db` | 离线 / 限额时的最后保障 |
-| 4. Websearch 模式 | `DATA_MODE=websearch` | 无需任何 Token | 纯框架与历史知识问答，无实时数据 |
+| 1. Indevs | `INDEVS_API_KEY` | Tushare Replay 数据 | 配置后最优先 |
+| 2. Tushare Pro | `TUSHARE_TOKEN` + `TUSHARE_API_URL` | 实时行情、财务数据、资金流向 | 数据最全 |
+| 3. a-stock-data | 无需配置（零配置时的默认） | 实时行情、K 线、股票信息 | 免费源（v4.1.0 新增，腾讯/百度/东财/通达信） |
+| 4. tushare-data-bridge | `TUSHARE_BRIDGE_ENABLED=auto/always` | HTTP 代理缓存的数据 | Tushare 直连受限时自动回退 |
+| 5. 本地 SQLite | 已执行过 `python -m modules.data_sync sync` | `data/stock_data.db` | 离线 / 限额时的最后保障 |
+| 6. Websearch 模式 | `DATA_MODE=websearch` | 无需任何 Token | 纯框架与历史知识问答，无实时数据 |
 
 > 即使处于降级路径，本工具也**不会编造价格或信号**，而是明确告知用户当前数据状态。
 
@@ -964,7 +967,7 @@ print(format_report(report))
 ```python
 from modules.datasource import get_datasource
 
-# 自动按优先级选数据源（Tushare → bridge → SQLite）
+# 自动按优先级选数据源（Indevs → Tushare → a-stock-data → bridge → SQLite）
 ds = get_datasource(preferred="auto")
 df = ds.get_kline_dicts("600487.SH", start_date="20250101", end_date="20260601")
 ```
@@ -980,16 +983,17 @@ df = ds.get_kline_dicts("600487.SH", start_date="20250101", end_date="20260601")
 | **JNB 模式** | `DATA_MODE=jnb` | 接入 Tushare 真实行情，具备实时数据查询、技术指标计算、战法识别能力 |
 | **普通小万** | `DATA_MODE=websearch` | 纯 LLM 对话，不走任何外部数据接口 |
 
-### 四层数据路径降级
+### 五层数据路径降级
 
 ```
-Tushare Pro  ──┐
-                ├──► CompositeDataSource ──► DataSource Protocol
-tushare-data-   │   （实例级配置隔离、         ──► 选股 / 分析 / 模拟
-bridge (HTTP) ──┤    并行安全、pickle 预检）
-                │
-本地 SQLite ──┘
-                │
+Indevs ──────────┐
+Tushare Pro ─────┤
+a-stock-data ────┤
+（免费源）       ├──► CompositeDataSource ──► DataSource Protocol
+tushare-data- ───┤   （实例级配置隔离、         ──► 选股 / 分析 / 模拟
+bridge (HTTP) ───┤    并行安全、pickle 预检）
+本地 SQLite ─────┘
+                 │
 DATA_MODE=websearch 模式（纯框架与历史知识）
 ```
 
@@ -1005,7 +1009,7 @@ zettaranc-skill/
 ├── LICENSE                       # MIT
 ├── skill.json                    # Skill 元数据
 ├── docs/                         # 项目文档
-│   ├── CHANGELOG.md              # 版本变更日志（v3.6.0 最新）
+│   ├── CHANGELOG.md              # 版本变更日志（v4.1.0 最新）
 │   ├── USER_GUIDE.md             # 详细使用手册
 │   ├── CONFIG_GUIDE.md           # 配置指南
 │   ├── intent-router-design.md   # 意图路由设计文档
@@ -1033,8 +1037,9 @@ zettaranc-skill/
 │   ├── __init__.py               # 统一 .env 加载入口
 │   ├── cli.py / cli_commands.py  # CLI 主入口（14 个顶层子命令）
 │   ├── database.py               # SQLite 管理（15 张表 + 事务上下文，WAL）
-│   ├── datasource.py             # 统一数据源协议（Tushare / Bridge / SQLite / Composite）
+│   ├── datasource.py             # 统一数据源协议（Indevs / Tushare / a-stock-data / Bridge / SQLite / Composite）
 │   ├── tushare_client.py         # Tushare Pro API 封装（120 次/分钟限流）
+│   ├── a_stock_data_client.py    # 免费数据源封装（腾讯/百度/东财/通达信，v4.1.0 新增）
 │   ├── bridge_client.py          # tushare-data-bridge HTTP 客户端（v3.2.0 新增）
 │   ├── data_sync.py              # 向后兼容 shim → 实际逻辑在 `modules/data_sync/`
 │   ├── data_sync/                # 数据同步子包（增量 / 全量 / 限流）
@@ -1100,7 +1105,7 @@ zettaranc-skill/
 ├── frontend/                     # React 19 + Vite 8 + TS 6 + Tailwind 4 + ECharts 6
 │   ├── src/（pages / components / hooks / stores / styles / lib / api）
 │   └── vite.config.ts            # 端口 5173，代理 /api 到 localhost:8000
-├── tests/                        # 单元测试（pytest，903 用例 / 52 文件，892 passed / 11 skipped）
+├── tests/                        # 单元测试（pytest，100 文件，1383 passed / 16 skipped）
 │   ├── conftest.py / test_database.py / test_datasource.py / test_data_sync*.py
 │   ├── test_indicators*.py / test_strategies.py / test_kirin_detector.py / test_wave_theory.py
 │   ├── test_screener*.py / test_backtest*.py / test_loop_engine.py
@@ -1386,7 +1391,7 @@ python corpus/quality_check.py SKILL.md --score     # 输出 0-100 综合分数
 python corpus/dual_axis_review.py SKILL.md
 
 # 单元测试
-python -m pytest tests/ -v     # 892 passed, 11 skipped
+python -m pytest tests/ -v     # 1383 passed, 16 skipped
 
 # Lint + Type
 ruff check modules tests

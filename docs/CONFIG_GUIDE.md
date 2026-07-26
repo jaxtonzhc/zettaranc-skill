@@ -14,7 +14,7 @@ DATA_MODE=jnb
 
 | 值 | 说明 | 依赖 |
 |---|------|------|
-| `jnb` | 接入 Tushare 真实行情数据 | 必须配置 `TUSHARE_TOKEN` + `TUSHARE_API_URL` |
+| `jnb` | 接入真实行情数据 | 配置 `TUSHARE_TOKEN` + `TUSHARE_API_URL` 数据最全；零配置时默认走 a-stock-data 免费源（v4.1.0 新增） |
 | `websearch` | 纯 LLM 对话模式，不走行情接口 | 无需 Tushare 配置 |
 
 ---
@@ -31,11 +31,11 @@ TUSHARE_VERIFY_TOKEN_URL=
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `TUSHARE_TOKEN` | 是（jnb） | Tushare Pro 的 56 位 Token，在 https://tushare.pro/user/token 获取 |
-| `TUSHARE_API_URL` | 是（jnb） | 中转 API 地址，如 `https://tt.xiaodefa.cn` |
+| `TUSHARE_TOKEN` | 否（jnb 建议） | Tushare Pro 的 56 位 Token，在 https://tushare.pro/user/token 获取 |
+| `TUSHARE_API_URL` | 否（jnb 建议） | 中转 API 地址，如 `https://tt.xiaodefa.cn` |
 | `TUSHARE_VERIFY_TOKEN_URL` | 否 | 实时行情验证地址，一般不需要 |
 
-**注意**：如果 `DATA_MODE` 不是 `jnb`，这些配置可以为空，程序不会报错。
+**注意**：如果 `DATA_MODE` 不是 `jnb`，这些配置可以为空，程序不会报错；jnb 模式下未配置 Token 时会自动回退 a-stock-data 免费数据源（腾讯/百度/东财/通达信，无需 API Key）。
 
 ---
 

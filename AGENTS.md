@@ -16,7 +16,7 @@
 - **Web 看板**：`api/`（FastAPI 后端）+ `frontend/`（React + Vite + Tailwind 前端），可选
 - **语料基础**：约 467 篇直播/付费课整理文章（~200 万字）+ 13 个 ztalk 视频 transcript（~12.7 万字）+ 9 篇交易心理系列（~3.3 万字）+ 后续新增文章
 - **许可证**：MIT
-- **当前版本**：**v3.10.4**（以 `pyproject.toml` 与 `docs/CHANGELOG.md` 为准）
+- **当前版本**：**v4.1.0**（以 `pyproject.toml` 与 `docs/CHANGELOG.md` 为准）
 
 ### 双模式架构
 
@@ -27,14 +27,17 @@
 
 ### 数据源优先级与降级路径
 
-`modules/datasource.py` 的 `CompositeDataSource` 在 `auto` 模式下按以下优先级选源：
+`modules/datasource.py` 的 `CompositeDataSource` 在 `auto` 模式下按以下优先级选源（token 感知）：
 
 ```
-Indevs（配置 INDEVS_API_KEY 时优先，v3.8.1 新增）
-  → Tushare Pro（TUSHARE_TOKEN + TUSHARE_API_URL）
+Indevs（配置 INDEVS_API_KEY 时最优先，v3.8.1 新增）
+  → Tushare Pro（配置 TUSHARE_TOKEN 时）
+  → a-stock-data（免费源，v4.1.0 新增，零配置时的默认）
   → tushare-data-bridge（HTTP 缓存代理，TUSHARE_BRIDGE_ENABLED=auto/always）
   → 本地 SQLite（data/stock_data.db，离线兜底）
 ```
+
+其中 **a-stock-data**（`modules/a_stock_data_client.py`）是 v4.1.0 新增的免费数据源：无需任何 API Key，封装腾讯财经 / 百度股市通 / 东方财富 / 通达信（mootdx）公开接口，零配置即可获取实时行情与 K 线。
 
 自 **v3.8.2** 起，K 线读取统一走 **DB 优先** 策略：先查 `daily_kline` 表，DB 没有时才调 API 并写回 DB 缓存。即使处于降级路径，工具也**不会编造价格或信号**，而是明确告知当前数据状态。
 
@@ -49,6 +52,7 @@ Python 数据层（modules/）              LLM 角色层（SKILL.md）
 ├─ bridge_client.py      tushare-data-       ├─ 表达 DNA
 │                         bridge HTTP 客户端  └─ 诚实边界
 ├─ indevs_client.py      Indevs 数据客户端（v3.8.1）
+├─ a_stock_data_client.py 免费数据源客户端（v4.1.0，腾讯/百度/东财/通达信）
 ├─ database.py           SQLite 管理（15 张表）
 ├─ data_sync.py          兼容 shim
 ├─ data_sync/            数据同步子包
@@ -240,7 +244,7 @@ references/research/（11 份调研提炼文件）
 | 接口协议 | CLI（`zt` 入口）、可选 FastAPI Web 服务（`zt-web`） |
 | 前端看板 | React 19 + Vite 8 + TypeScript 6 + Tailwind CSS 4 + ECharts 6 |
 | 状态管理 | Zustand 5 + TanStack React Query 5 + axios + react-router-dom 7 |
-| 测试框架 | `pytest`（实测 **1179 用例 passed，15 skipped**，75 个 .py 文件 + 1 个 .md） |
+| 测试框架 | `pytest`（实测 **1383 用例 passed，16 skipped**，100 个 .py 文件 + 1 个 .md） |
 | 代码质量 | `ruff`（lint + format）、`mypy`、pre-commit |
 | 视频下载 | `yt-dlp`（语料采集，可选） |
 | 语音转写 | `faster-whisper`（语料采集，可选） |
@@ -392,7 +396,7 @@ zt verify v1.0 --limit 50 --days 300 --walk-forward
 ### 运行测试
 
 ```bash
-# 全部测试（当前实测：1179 passed, 15 skipped，约 30s）
+# 全部测试（当前实测：1383 passed, 16 skipped，约 30s）
 python -m pytest tests/ -v
 
 # 单文件测试
@@ -573,6 +577,7 @@ mypy modules/ --ignore-missing-imports
 **注意**：技术债清理、内部重构属于 PATCH，不是 MINOR。避免版本号增长过快。
 
 **近期版本脉络**（详见 `docs/CHANGELOG.md`）：
+- **v4.1.0**：免费数据源集成（a-stock-data，token 感知优先级）
 - **v3.10.4**：技术债与文档收尾（版本号五处统一、USER_GUIDE 追平、性能优化 6.3x/2.4x、`core/errors.py` 统一错误码）
 - **v3.10.3**：组合回测策略权重按市场环境动态调整 + 各策略贡献度统计（`StrategyStats`）
 - **v3.10.2**：组合回测参数 IS 网格搜索自动寻优（`portfolio_grid_search_optimize()`）
@@ -640,7 +645,7 @@ mypy modules/ --ignore-missing-imports
 
 ```bash
 $ python -m pytest tests/ -v
-# 当前实测结果：1179 passed, 15 skipped（约 30 秒）
+# 当前实测结果：1383 passed, 16 skipped（约 30 秒）
 ```
 
 ---

@@ -1,6 +1,6 @@
 {
   "name": "zettaranc-skill",
-  "version": "4.0.3",
+  "version": "4.1.0",
   "description": "A股唯一可运行的交易纪律蒸馏系统——从200万字语料到可回测可自改进的交易操作系统",
   "author": {
     "name": "lululu811",
@@ -143,7 +143,7 @@
   ],
   "test_prompts": "test-prompts.json",
   "quality_metrics": {
-    "tests": "892 passed",
+    "tests": "1383 passed",
     "quality_check": "100/100",
     "coverage": "high"
   },

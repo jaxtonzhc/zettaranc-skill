@@ -1,6 +1,6 @@
 # zettaranc-skill 使用手册 & 操作手册
 
-> 版本：v3.10.4 | 更新日期：2026-07-16
+> 版本：v4.1.0 | 更新日期：2026-07-23
 > 
 > 面向用户：想使用此项目做量化分析的人
 
@@ -49,9 +49,11 @@ zettaranc-skill 是一个**AI 思维框架蒸馏包 + 真实数据量化工具**
 ### 1.2 架构分层
 
 ```
-Indevs（可选，配置 INDEVS_API_KEY 时优先）
+Indevs（可选，配置 INDEVS_API_KEY 时最优先）
     ↓
 Tushare Pro API（TUSHARE_TOKEN + TUSHARE_API_URL）
+    ↓
+a-stock-data（免费源，v4.1.0 新增，零配置默认：腾讯/百度/东财/通达信）
     ↓
 tushare-data-bridge（HTTP 缓存代理，可选降级）
     ↓
@@ -82,7 +84,7 @@ SKILL.md（LLM 角色层：Z 哥视角点评、多轮问诊、表达 DNA）
 | 数据库 | SQLite（本地文件，15 张表 + 索引） |
 | 数据处理 | pandas（Tushare 依赖） |
 | 环境配置 | python-dotenv（.env 文件） |
-| 测试框架 | pytest（实测 1167 passed, 15 skipped） |
+| 测试框架 | pytest（实测 1383 passed, 16 skipped） |
 | 版本控制 | Git |
 
 ---
@@ -205,14 +207,17 @@ ZETTARANC_BACKTEST_IMPL=auto zt verify v1.0 --limit 50 --days 250
 
 ### 3.2 数据源优先级与降级路径
 
-`modules/datasource.py` 的 `CompositeDataSource` 在 `auto` 模式下按以下优先级选源：
+`modules/datasource.py` 的 `CompositeDataSource` 在 `auto` 模式下按以下优先级选源（token 感知）：
 
 ```
-Indevs（配置 INDEVS_API_KEY 时优先，v3.8.1 新增）
-  → Tushare Pro（TUSHARE_TOKEN + TUSHARE_API_URL）
+Indevs（配置 INDEVS_API_KEY 时最优先，v3.8.1 新增）
+  → Tushare Pro（配置 TUSHARE_TOKEN 时）
+  → a-stock-data（免费源，v4.1.0 新增，零配置时的默认）
   → tushare-data-bridge（HTTP 缓存代理）
   → 本地 SQLite（data/stock_data.db，离线兜底）
 ```
+
+其中 a-stock-data（`modules/a_stock_data_client.py`）无需任何 API Key，封装腾讯财经 / 百度股市通 / 东方财富 / 通达信（mootdx）免费接口。
 
 自 v3.8.2 起，K 线读取统一走 **DB 优先** 策略：先查 `daily_kline` 表，DB 没有时才调 API 并把结果写回 DB 缓存。即使处于降级路径，工具也不会编造价格或信号，而是明确告知当前数据状态。
 
@@ -988,7 +993,7 @@ print(f"最新价: {data.close}, 涨跌: {data.pct_chg}%")
 ### 17.1 运行测试
 
 ```bash
-# 全部测试（当前实测：1167 passed, 15 skipped，约 30 秒）
+# 全部测试（当前实测：1383 passed, 16 skipped，约 30 秒）
 python -m pytest tests/ -v
 
 # 单文件测试
