@@ -114,13 +114,20 @@ class TestApiMethods:
         return c
 
     def test_get_daily_returns_dataframe(self, client):
-        """get_daily 正常返回 DataFrame"""
+        """get_daily 正常返回 DataFrame（JNB 模式 _pro 可用时）"""
         mock_df = pd.DataFrame({"trade_date": ["20260115"], "close": [100.0]})
+        client._pro = MagicMock()
         with patch("modules.tushare_client.ts.pro_bar", return_value=mock_df):
             result = client.get_daily("600519.SH", "20260101", "20260115")
             assert result is not None
             assert len(result) == 1
             assert result.iloc[0]["close"] == 100.0
+
+    def test_get_daily_websearch_returns_none(self, client):
+        """websearch 模式 _pro=None（无数据后端）时 get_daily 返回 None，不触发 ts.pro_bar"""
+        with patch("modules.tushare_client.ts.pro_bar") as mock_bar:
+            assert client.get_daily("600519.SH", "20260101", "20260115") is None
+            mock_bar.assert_not_called()
 
     def test_get_daily_exception_returns_none(self, client):
         """get_daily 异常时返回 None
@@ -220,6 +227,7 @@ class TestApiMethods:
 
     def test_check_connection_success(self, client):
         mock_df = pd.DataFrame({"close": [100.0]})
+        client._pro = MagicMock()
         with patch("modules.tushare_client.ts.pro_bar", return_value=mock_df):
             assert client.check_connection() is True
 

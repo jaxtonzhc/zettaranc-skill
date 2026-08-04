@@ -157,11 +157,6 @@ def _make_tdx_bars(n: int = 10) -> pd.DataFrame:
     )
 
 
-def _refused_connection(*args, **kwargs):
-    """模拟 TCP 连接被拒"""
-    raise OSError("connection refused")
-
-
 # ==================== 代码转换工具函数 ====================
 
 
@@ -484,6 +479,16 @@ class TestEastmoneyStockInfo:
         mock_em_get.return_value = mock_resp
         assert eastmoney_stock_info("600519") == {}
 
+    @patch("modules.a_stock_data_client._em_get")
+    def test_list_payload_returns_empty(self, mock_em_get):
+        """异常响应返回 JSON 数组（list）：按空数据处理，不抛 AttributeError"""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [{"msg": "error"}]
+        mock_em_get.return_value = mock_resp
+        info = eastmoney_stock_info("600519")
+        assert info["name"] == ""
+        assert info["total_shares"] == 0
+
 
 class TestEastmoneyFundFlow:
     """东财资金流向（分钟级 / 120 日日级）解析"""
@@ -559,29 +564,30 @@ class TestMootdxKline:
         monkeypatch.setitem(sys.modules, "mootdx.quotes", None)
         assert _mootdx_kline("600519") is None
 
-    def test_probe_success_uses_first_server(self, monkeypatch):
-        """_probe 成功：使用首个可达服务器创建 Quotes client"""
+    def test_bestip_first(self, monkeypatch):
+        """优先 bestip=True 自动选优（替代 8 个服务器的顺序探测）"""
         mock_quotes_cls, _ = _install_fake_mootdx(monkeypatch, _make_tdx_bars())
-        monkeypatch.setattr("socket.create_connection", MagicMock())
-
-        df = _mootdx_kline("600519", days=10)
-        mock_quotes_cls.factory.assert_called_once_with(market="std", server=("119.97.185.59", 7709))
-        assert df is not None
-        assert len(df) == 10
-
-    def test_probe_all_fail_fallback_bestip(self, monkeypatch):
-        """_probe 全部失败：回退到 bestip=True 自动选优"""
-        mock_quotes_cls, _ = _install_fake_mootdx(monkeypatch, _make_tdx_bars())
-        monkeypatch.setattr("socket.create_connection", _refused_connection)
 
         df = _mootdx_kline("600519", days=10)
         mock_quotes_cls.factory.assert_called_once_with(market="std", bestip=True)
+        assert df is not None
+        assert len(df) == 10
+
+    def test_bestip_fail_fallback_default(self, monkeypatch):
+        """bestip 探测失败：回退到默认 factory"""
+        mock_quotes_cls, _ = _install_fake_mootdx(monkeypatch, _make_tdx_bars())
+        mock_quotes_cls.factory.side_effect = [OSError("bestip failed"), mock_quotes_cls.factory.return_value]
+
+        df = _mootdx_kline("600519", days=10)
+        assert mock_quotes_cls.factory.call_count == 2
+        assert mock_quotes_cls.factory.call_args_list[0].kwargs == {"market": "std", "bestip": True}
+        assert mock_quotes_cls.factory.call_args_list[1].args == ()
+        assert mock_quotes_cls.factory.call_args_list[1].kwargs == {"market": "std"}
         assert df is not None
 
     def test_kline_dataframe_mapping(self, monkeypatch):
         """datetime 映射为 8 位 trade_date（.str[:8] 按字符截取），pct_chg 自动计算，行数不丢失"""
         _install_fake_mootdx(monkeypatch, _make_tdx_bars(10))
-        monkeypatch.setattr("socket.create_connection", MagicMock())
 
         df = _mootdx_kline("600519", days=10)
         assert df is not None
@@ -595,7 +601,6 @@ class TestMootdxKline:
     def test_bars_none_or_empty_returns_none(self, monkeypatch):
         """bars 返回 None 或空 DataFrame 时返回 None"""
         mock_quotes_cls, mock_client = _install_fake_mootdx(monkeypatch, None)
-        monkeypatch.setattr("socket.create_connection", MagicMock())
         assert _mootdx_kline("600519") is None
 
         mock_client.bars.return_value = pd.DataFrame()
@@ -732,10 +737,12 @@ class TestAStockDataClient:
         assert row["ts_code"] == "600519.SH"
         assert row["trade_date"] == "20260724"
         assert row["net_mf_amount"] == 300.0
-        assert row["buy_sm_vol"] == -10.0
-        assert row["buy_med_vol"] == 25.0
-        assert row["buy_lg_vol"] == 70.0
-        assert row["buy_elg_vol"] == 100.0
+        # 输出 tushare 兼容列名（与 syncer.sync_moneyflow / moneyflow 表对齐）
+        assert row["buy_sm_amount"] == -10.0
+        assert row["buy_md_amount"] == 25.0
+        assert row["buy_lg_amount"] == 70.0
+        assert row["buy_elg_amount"] == 100.0
+        assert row["net_mf_rate"] == 0.0
 
     def test_get_moneyflow_empty_returns_none(self, client):
         """无资金流向数据返回 None"""
@@ -786,6 +793,15 @@ class TestAStockDataClient:
         assert row["market"] == "主板"
         assert row["list_date"] == "20010827"
 
+    def test_get_stock_basic_kechuang_market(self, client):
+        """688 开头应分类为科创板而非主板（回归：旧三元式顺序错误）"""
+        info = {"code": "688981", "name": "中芯国际", "industry": "半导体"}
+        with patch("modules.a_stock_data_client.eastmoney_stock_info", return_value=info):
+            df = client.get_stock_basic("688981.SH")
+        assert df is not None
+        row = df.iloc[0]
+        assert row["market"] == "科创板"
+
     def test_get_stock_basic_no_ts_code_returns_none(self, client):
         """全量查询不支持：不传 ts_code 时返回 None 且不调东财"""
         with patch("modules.a_stock_data_client.eastmoney_stock_info") as mock_info:
@@ -815,3 +831,9 @@ class TestAStockDataClient:
         assert client.get_stk_factor("600519.SH") is None
         assert client.get_trade_cal() is None
         assert client.get_stock_list() == []
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main([__file__, "-v"]))

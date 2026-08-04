@@ -148,16 +148,51 @@ def test_data_syncer_default_datasource_prefers_indevs(monkeypatch):
     assert syncer._datasource.name == "indevs"
 
 
-def test_data_syncer_default_datasource_prefers_tushare_when_token_env_set(monkeypatch):
-    """仅配置 TUSHARE_TOKEN 环境变量（无 INDEVS_API_KEY）时，默认数据源为 tushare（老用户行为不变）"""
-    from modules.datasource import TushareDataSource
+def test_data_syncer_default_datasource_websearch_token_uses_a_stock_data(monkeypatch):
+    """websearch 模式（默认）仅配置 TUSHARE_TOKEN 环境变量时，默认数据源为 a-stock-data。
+
+    tushare 在 websearch 模式下无数据后端（_pro=None），路由过去必失败；
+    父版本 auto 行为即 a-stock-data，老用户行为保持不变。
+    """
+    from modules.datasource import AStockDataDataSource
     from modules.data_sync.syncer import DataSyncer
 
     monkeypatch.delenv("INDEVS_API_KEY", raising=False)
     monkeypatch.setenv("TUSHARE_TOKEN", "env-token")
     syncer = DataSyncer()
+    assert isinstance(syncer._datasource, AStockDataDataSource)
+
+
+def test_data_syncer_default_datasource_prefers_tushare_in_jnb(monkeypatch):
+    """JNB 模式 + TUSHARE_TOKEN + TUSHARE_API_URL 时，默认数据源为 tushare（老用户行为不变）"""
+    import modules.tushare_client as tc
+
+    from modules.datasource import TushareDataSource
+    from modules.data_sync.syncer import DataSyncer
+
+    monkeypatch.setenv("DATA_MODE", "jnb")
+    # 模块级常量在 import 时读取，monkeypatch.setenv 无效，需直接改模块属性
+    monkeypatch.setattr(tc, "TUSHARE_API_URL", "https://tt.xiaodefa.cn")
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    monkeypatch.setenv("TUSHARE_TOKEN", "env-token")
+    syncer = DataSyncer()
     assert isinstance(syncer._datasource, TushareDataSource)
     assert syncer._datasource._client.token == "env-token"
+
+
+def test_data_syncer_jnb_missing_url_falls_back_to_a_stock_data(monkeypatch):
+    """JNB 模式 + TUSHARE_TOKEN 但缺 TUSHARE_API_URL：构造期不抛错，回退 a-stock-data"""
+    import modules.tushare_client as tc
+
+    from modules.datasource import AStockDataDataSource
+    from modules.data_sync.syncer import DataSyncer
+
+    monkeypatch.setenv("DATA_MODE", "jnb")
+    monkeypatch.setattr(tc, "TUSHARE_API_URL", "")
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    monkeypatch.setenv("TUSHARE_TOKEN", "env-token")
+    syncer = DataSyncer()
+    assert isinstance(syncer._datasource, AStockDataDataSource)
 
 
 def test_datasyncer_honors_token_argument(monkeypatch):

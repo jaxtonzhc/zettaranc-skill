@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import random
-import socket
 import time
 import urllib.request
 from datetime import datetime, timedelta
@@ -329,10 +328,15 @@ def eastmoney_stock_info(code: str) -> dict:
     if r is None:
         return {}
     try:
-        d = (r.json() or {}).get("data") or {}
+        payload = r.json()
     except ValueError:
         logger.warning("[a-stock-data] 个股信息 JSON 解析失败")
         return {}
+    # 兜底：异常响应可能返回 JSON 数组（如 [] 或 [{'msg': ...}]），对非 dict 直接视为空
+    if not isinstance(payload, dict):
+        logger.warning("[a-stock-data] 个股信息响应非对象: %r", type(payload).__name__)
+        payload = {}
+    d = payload.get("data") or {}
     return {
         "code": d.get("f57", ""),
         "name": d.get("f58", ""),
@@ -445,36 +449,13 @@ def _mootdx_kline(code: str, days: int = 60, frequency: int = 9) -> pd.DataFrame
         logger.debug("[a-stock-data] mootdx 未安装，跳过")
         return None
 
-    # 备选服务器列表（按延迟排序）
-    _TDX_SERVERS = [
-        ("119.97.185.59", 7709),
-        ("124.70.133.119", 7709),
-        ("116.205.183.150", 7709),
-        ("123.60.73.44", 7709),
-        ("116.205.163.254", 7709),
-        ("121.36.225.169", 7709),
-        ("123.60.70.228", 7709),
-        ("124.71.9.153", 7709),
-    ]
-
-    def _probe(ip, port, timeout=2.0):
-        try:
-            with socket.create_connection((ip, port), timeout=timeout):
-                return True
-        except Exception:
-            return False
-
     try:
-        client = None
-        for ip, port in _TDX_SERVERS:
-            if _probe(ip, port):
-                client = Quotes.factory(market="std", server=(ip, port))
-                break
-        if client is None:
-            try:
-                client = Quotes.factory(market="std", bestip=True)
-            except Exception:
-                client = Quotes.factory(market="std")
+        # bestip=True 自动探测并选优服务器（等价于逐个 socket 探测，但并发执行，
+        # 最坏 ~1-2s，而非 8 个服务器 × 2s 的顺序阻塞）
+        try:
+            client = Quotes.factory(market="std", bestip=True)
+        except Exception:
+            client = Quotes.factory(market="std")
 
         bars = client.bars(symbol=code, frequency=frequency, offset=days)
         if bars is None or bars.empty:
@@ -658,20 +639,23 @@ class AStockDataClient:
             total_large = sum(r["large_net"] for r in rows)
             total_mid = sum(r["mid_net"] for r in rows)
             total_small = sum(r["small_net"] for r in rows)
+            # 输出 tushare 官方 moneyflow 兼容列名（buy_sm_amount 等），
+            # 与 syncer.sync_moneyflow / moneyflow 表列名对齐，避免写入全 NULL 行
             df = pd.DataFrame(
                 [
                     {
                         "ts_code": ts_code,
                         "trade_date": trade_date,
-                        "buy_sm_vol": total_small,
-                        "buy_med_vol": total_mid,
-                        "buy_lg_vol": total_large,
-                        "buy_elg_vol": total_super,
-                        "sell_sm_vol": 0,
-                        "sell_med_vol": 0,
-                        "sell_lg_vol": 0,
-                        "sell_elg_vol": 0,
+                        "buy_sm_amount": total_small,
+                        "buy_md_amount": total_mid,
+                        "buy_lg_amount": total_large,
+                        "buy_elg_amount": total_super,
+                        "sell_sm_amount": 0,
+                        "sell_md_amount": 0,
+                        "sell_lg_amount": 0,
+                        "sell_elg_amount": 0,
                         "net_mf_amount": total_main,
+                        "net_mf_rate": 0.0,
                     }
                 ]
             )
@@ -743,10 +727,11 @@ class AStockDataClient:
                             "ts_code": ts_code,
                             "name": info.get("name", ""),
                             "industry": info.get("industry", ""),
-                            "market": "主板"
-                            if code.startswith("6")
+                            # 注意顺序：688 先于 6 判断，否则科创板会被误判为主板
+                            "market": "科创板"
+                            if code.startswith("688")
                             else (
-                                "创业板" if code.startswith("3") else ("科创板" if code.startswith("688") else "其他")
+                                "创业板" if code.startswith("3") else ("主板" if code.startswith("6") else "其他")
                             ),
                             "list_date": info.get("list_date", ""),
                             "total_share": info.get("total_shares", 0),
@@ -807,3 +792,38 @@ class AStockDataClient:
                 }
             )
         return result
+
+
+# 测试
+if __name__ == "__main__":
+    import sys
+    import io
+
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    logging.basicConfig(level=logging.INFO)
+
+    client = AStockDataClient()
+    print("=" * 50)
+    print("A-Stock-Data 免费数据源连通性测试")
+    print("=" * 50)
+
+    print("\n=== 平安银行 (000001.SZ) 日线 ===")
+    df = client.get_daily("000001.SZ", "20250701", "20250715")
+    if df is not None and len(df) > 0:
+        print(df[["trade_date", "open", "high", "low", "close", "pct_chg"]].to_string(index=False))
+    else:
+        print("无数据")
+
+    print("\n=== 平安银行 (000001.SZ) 资金流向 ===")
+    mf = client.get_moneyflow("000001.SZ", "20250710")
+    if mf is not None and len(mf) > 0:
+        print(mf.to_string(index=False))
+    else:
+        print("无数据")
+
+    print("\n=== 贵州茅台 (600519.SH) 基础信息 ===")
+    sb = client.get_stock_basic("600519.SH")
+    if sb is not None and len(sb) > 0:
+        print(sb.to_string(index=False))
+    else:
+        print("无数据")

@@ -273,7 +273,13 @@ def test_composite_auto_prefers_a_stock_data_without_config(monkeypatch):
 
 
 def test_composite_auto_prefers_tushare_when_token_set(monkeypatch):
-    """配置 TUSHARE_TOKEN（无 INDEVS_API_KEY）时 auto 模式优先 tushare。"""
+    """JNB 模式配置 TUSHARE_TOKEN（无 INDEVS_API_KEY）时 auto 模式优先 tushare。"""
+    import modules.tushare_client as tc
+
+    monkeypatch.setenv("DATA_MODE", "jnb")
+    # 模块级常量在 import 时读取，monkeypatch.setenv 无效，需直接改模块属性
+    monkeypatch.setattr(tc, "TUSHARE_API_URL", "https://tt.xiaodefa.cn")
+    monkeypatch.setattr(tc, "TUSHARE_TOKEN", "dummy-token")
     monkeypatch.delenv("INDEVS_API_KEY", raising=False)
     monkeypatch.setenv("TUSHARE_TOKEN", "dummy-token")
     sentinel = pd.DataFrame([{"close": 1.0}])
@@ -287,6 +293,44 @@ def test_composite_auto_prefers_tushare_when_token_set(monkeypatch):
 
     ds = CompositeDataSource("auto")
     assert ds.get_daily("600519.SH", "20260101", "20260102") is sentinel
+
+
+def test_composite_auto_websearch_token_goes_a_stock_data(monkeypatch):
+    """websearch 模式（默认）即使配置 TUSHARE_TOKEN 也走 a-stock-data（tushare 无数据后端）。"""
+    monkeypatch.setenv("DATA_MODE", "websearch")
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    monkeypatch.setenv("TUSHARE_TOKEN", "dummy-token")
+    sentinel = pd.DataFrame([{"close": 1.0}])
+
+    monkeypatch.setattr(
+        TushareDataSource, "get_daily", lambda self, *a, **k: pytest.fail("websearch 模式不应调用 tushare")
+    )
+    monkeypatch.setattr(IndevsDataSource, "get_daily", lambda self, *a, **k: pytest.fail("不应调用 indevs"))
+    monkeypatch.setattr(AStockDataDataSource, "get_daily", lambda self, *a, **k: sentinel)
+
+    ds = CompositeDataSource("auto")
+    assert ds.get_daily("600519.SH", "20260101", "20260102") is sentinel
+    # 不应构造 tushare 源
+    assert ds._tushare is None
+
+
+def test_composite_auto_jnb_missing_url_falls_back(monkeypatch):
+    """JNB 模式 + TUSHARE_TOKEN 但缺 TUSHARE_API_URL：构造 tushare 抛 ZettarancError，回退 a-stock-data 不崩溃。"""
+    import modules.tushare_client as tc
+
+    monkeypatch.setenv("DATA_MODE", "jnb")
+    # 模块属性需显式置空：其他测试可能 reload 模块留下非空 TUSHARE_API_URL
+    monkeypatch.setattr(tc, "TUSHARE_API_URL", "")
+    monkeypatch.delenv("TUSHARE_API_URL", raising=False)
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    monkeypatch.setenv("TUSHARE_TOKEN", "dummy-token")
+    sentinel = pd.DataFrame([{"close": 1.0}])
+
+    monkeypatch.setattr(AStockDataDataSource, "get_daily", lambda self, *a, **k: sentinel)
+
+    ds = CompositeDataSource("auto")
+    assert ds.get_daily("600519.SH", "20260101", "20260102") is sentinel
+    assert ds._tushare is None
 
 
 def test_composite_auto_prefers_indevs_over_tushare(monkeypatch):
@@ -305,7 +349,12 @@ def test_composite_auto_prefers_indevs_over_tushare(monkeypatch):
 
 
 def test_composite_auto_falls_back_to_a_stock_data_when_tushare_returns_none(monkeypatch):
-    """tushare 无数据（返回 None）时 auto 模式回退 a-stock-data。"""
+    """JNB 模式 tushare 无数据（返回 None）时 auto 模式回退 a-stock-data。"""
+    import modules.tushare_client as tc
+
+    monkeypatch.setenv("DATA_MODE", "jnb")
+    monkeypatch.setattr(tc, "TUSHARE_API_URL", "https://tt.xiaodefa.cn")
+    monkeypatch.setattr(tc, "TUSHARE_TOKEN", "dummy-token")
     monkeypatch.delenv("INDEVS_API_KEY", raising=False)
     monkeypatch.setenv("TUSHARE_TOKEN", "dummy-token")
     sentinel = pd.DataFrame([{"close": 1.0}])
@@ -315,3 +364,75 @@ def test_composite_auto_falls_back_to_a_stock_data_when_tushare_returns_none(mon
 
     ds = CompositeDataSource("auto")
     assert ds.get_daily("600519.SH", "20260101", "20260102") is sentinel
+
+
+def test_composite_auto_call_swallows_source_exception(monkeypatch):
+    """_auto_call 遇到源抛异常（而非返回 None）时回退下一源，不向上抛。"""
+    import modules.tushare_client as tc
+
+    monkeypatch.setenv("DATA_MODE", "jnb")
+    monkeypatch.setattr(tc, "TUSHARE_API_URL", "https://tt.xiaodefa.cn")
+    monkeypatch.setattr(tc, "TUSHARE_TOKEN", "dummy-token")
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    monkeypatch.setenv("TUSHARE_TOKEN", "dummy-token")
+    sentinel = pd.DataFrame([{"close": 1.0}])
+
+    def _boom(self, *a, **k):
+        raise KeyError("tushare boom")
+
+    monkeypatch.setattr(TushareDataSource, "get_daily", _boom)
+    monkeypatch.setattr(AStockDataDataSource, "get_daily", lambda self, *a, **k: sentinel)
+
+    ds = CompositeDataSource("auto")
+    assert ds.get_daily("600519.SH", "20260101", "20260102") is sentinel
+
+
+def test_composite_explicit_tushare_routes_to_tushare(monkeypatch):
+    """preferred='tushare' 应路由 tushare 源（回归：旧实现误路由到 indevs）。"""
+    import modules.tushare_client as tc
+
+    monkeypatch.setenv("DATA_MODE", "jnb")
+    monkeypatch.setattr(tc, "TUSHARE_API_URL", "https://tt.xiaodefa.cn")
+    monkeypatch.setattr(tc, "TUSHARE_TOKEN", "dummy-token")
+    monkeypatch.setenv("TUSHARE_TOKEN", "dummy-token")
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    sentinel = pd.DataFrame([{"close": 1.0}])
+
+    monkeypatch.setattr(TushareDataSource, "get_daily", lambda self, *a, **k: sentinel)
+    monkeypatch.setattr(
+        IndevsDataSource, "get_daily", lambda self, *a, **k: pytest.fail("preferred=tushare 不应调用 indevs")
+    )
+
+    ds = CompositeDataSource("tushare")
+    assert ds.get_daily("600519.SH", "20260101", "20260102") is sentinel
+
+
+def test_composite_explicit_indevs_routes_to_indevs(monkeypatch):
+    """preferred='indevs' 路由 indevs 源。"""
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    sentinel = pd.DataFrame([{"close": 1.0}])
+
+    monkeypatch.setattr(
+        TushareDataSource, "get_daily", lambda self, *a, **k: pytest.fail("preferred=indevs 不应调用 tushare")
+    )
+    monkeypatch.setattr(IndevsDataSource, "get_daily", lambda self, *a, **k: sentinel)
+
+    ds = CompositeDataSource("indevs")
+    assert ds.get_daily("600519.SH", "20260101", "20260102") is sentinel
+
+
+def test_composite_auto_health_check_bool_contract(monkeypatch):
+    """auto 模式 health_check 恒返回 bool：源探测异常（如 tushare 配置不完整）不向上抛。"""
+    import modules.tushare_client as tc
+
+    monkeypatch.setenv("DATA_MODE", "jnb")
+    monkeypatch.setattr(tc, "TUSHARE_API_URL", "")  # TushareClient 构造抛 ZettarancError
+    monkeypatch.delenv("INDEVS_API_KEY", raising=False)
+    monkeypatch.setenv("TUSHARE_TOKEN", "dummy-token")
+
+    monkeypatch.setattr(AStockDataDataSource, "health_check", lambda self: False)
+
+    ds = CompositeDataSource("auto")
+    result = ds.health_check()
+    assert isinstance(result, bool)
+    assert ds._tushare is None

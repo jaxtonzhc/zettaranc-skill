@@ -526,8 +526,12 @@ class CompositeDataSource:
 
     默认优先级（preferred="auto"），按环境变量 token 感知：
       - 配置了 INDEVS_API_KEY -> indevs 最优先
-      - 否则配置了 TUSHARE_TOKEN -> tushare 优先
+      - 否则 JNB 模式（DATA_MODE=jnb）配置了 TUSHARE_TOKEN -> tushare 优先
       - 然后 a-stock-data（免费）-> bridge -> SQLite 依次兜底
+
+    说明：websearch 模式下 TushareClient._pro=None（无数据后端），即使配置了
+    TUSHARE_TOKEN 也不路由 tushare，直接走 a-stock-data——这正是父版本行为，
+    避免「有 token 老用户」被路由到不可用的 tushare 后崩溃或静默 0 行。
 
     即：零配置新用户默认 a-stock-data（腾讯/百度/东财等免费公开接口，无需 API Key）；
     已配置 token 的老用户行为不变，不会被静默切换到免费源。
@@ -569,13 +573,21 @@ class CompositeDataSource:
     def _preferred_token_source(self) -> DataSource | None:
         """按环境变量返回 auto 模式的优先数据源。
 
-        配置了 INDEVS_API_KEY 时用 indevs；否则配置了 TUSHARE_TOKEN 时用 tushare；
+        配置了 INDEVS_API_KEY 时用 indevs；
+        否则仅 JNB 模式（DATA_MODE=jnb）且配置了 TUSHARE_TOKEN 时用 tushare——
+        websearch 模式下 TushareClient._pro=None（无数据后端），路由过去必然失败，
+        直接回退 a-stock-data，与父版本「auto 不碰 tushare」的行为一致；
         零配置返回 None（由调用方回退 a-stock-data）。
         """
         if os.environ.get("INDEVS_API_KEY"):
             return self._indevs_source
-        if os.environ.get("TUSHARE_TOKEN"):
-            return self._tushare_source
+        if os.environ.get("DATA_MODE", "websearch") == "jnb" and os.environ.get("TUSHARE_TOKEN"):
+            try:
+                return self._tushare_source
+            except ZettarancError as e:
+                # JNB 配置不完整（缺 TUSHARE_API_URL 等）：回退免费源而非崩溃
+                logger.warning("[datasource] tushare 配置不完整(%s)，回退 a-stock-data", e)
+                return None
         return None
 
     def _auto_sources(self) -> list[DataSource]:
@@ -588,14 +600,31 @@ class CompositeDataSource:
         return sources
 
     def _auto_call(self, method: str, *args):
-        """auto 模式按优先级调用单项接口：先优先源（如有），失败后回退 a-stock-data。
+        """auto 模式按优先级链调用单项接口：先优先源（如有），失败后依次回退。
 
+        与 _auto_sources 共用同一条链（a-stock-data -> bridge -> sqlite 兜底），
         返回首个非 None 结果；均失败时返回 None。
         """
-        for source in (self._preferred_token_source(), self._a_stock_data_source):
-            if source is None:
+        for source in self._auto_sources():
+            try:
+                result = getattr(source, method)(*args)
+            except (
+                requests.RequestException,
+                sqlite3.Error,
+                OSError,
+                ValueError,
+                KeyError,
+                ZettarancError,
+                AttributeError,
+            ) as e:
+                # 窄化：仅捕获 HTTP / DB / 数据解析 / 项目异常，回退到下一源
+                logger.warning(
+                    "[datasource] CompositeDataSource._auto_call(%s) 源 %s 失败: %s",
+                    method,
+                    getattr(source, "name", source.__class__.__name__),
+                    e,
+                )
                 continue
-            result = getattr(source, method)(*args)
             if result is not None:
                 return result
         return None
@@ -617,8 +646,28 @@ class CompositeDataSource:
             return self._indevs_source.health_check()
         if self._preferred == "a-stock-data":
             return self._a_stock_data_source.health_check()
-        # auto: 按 token 感知优先级链依次探测（indevs/tushare -> a-stock-data -> bridge -> sqlite）
-        return any(source.health_check() for source in self._auto_sources())
+        # auto: 按 token 感知优先级链依次探测（indevs/tushare -> a-stock-data -> bridge -> sqlite），
+        # 任一源探测异常（如 tushare 配置不完整）时记录并继续下一源，保持 bool 返回契约
+        for source in self._auto_sources():
+            try:
+                if source.health_check():
+                    return True
+            except (
+                requests.RequestException,
+                sqlite3.Error,
+                OSError,
+                ValueError,
+                KeyError,
+                ZettarancError,
+                AttributeError,
+            ) as e:
+                logger.warning(
+                    "[datasource] CompositeDataSource.health_check 源 %s 失败: %s",
+                    getattr(source, "name", source.__class__.__name__),
+                    e,
+                )
+                continue
+        return False
 
     def get_daily(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
         """获取个股日线行情（OHLCV + 涨跌幅）"""
@@ -627,7 +676,9 @@ class CompositeDataSource:
         if self._preferred == "auto":
             # auto 模式：优先源（indevs/tushare，token 感知）-> a-stock-data 兜底
             return self._auto_call("get_daily", ts_code, start_date, end_date)
-        if self._preferred in ("tushare", "indevs"):
+        if self._preferred == "tushare":
+            return self._tushare_source.get_daily(ts_code, start_date, end_date)
+        if self._preferred == "indevs":
             return self._indevs_source.get_daily(ts_code, start_date, end_date)
         return None
 
@@ -637,7 +688,9 @@ class CompositeDataSource:
             return self._a_stock_data_source.get_index_daily(ts_code, start_date, end_date)
         if self._preferred == "auto":
             return self._auto_call("get_index_daily", ts_code, start_date, end_date)
-        if self._preferred in ("tushare", "indevs"):
+        if self._preferred == "tushare":
+            return self._tushare_source.get_index_daily(ts_code, start_date, end_date)
+        if self._preferred == "indevs":
             return self._indevs_source.get_index_daily(ts_code, start_date, end_date)
         return None
 
@@ -647,7 +700,9 @@ class CompositeDataSource:
             return self._a_stock_data_source.get_realtime_quote(ts_codes)
         if self._preferred == "auto":
             return self._auto_call("get_realtime_quote", ts_codes)
-        if self._preferred in ("tushare", "indevs"):
+        if self._preferred == "tushare":
+            return self._tushare_source.get_realtime_quote(ts_codes)
+        if self._preferred == "indevs":
             return self._indevs_source.get_realtime_quote(ts_codes)
         return None
 
@@ -657,7 +712,9 @@ class CompositeDataSource:
             return self._a_stock_data_source.get_moneyflow(ts_code, trade_date)
         if self._preferred == "auto":
             return self._auto_call("get_moneyflow", ts_code, trade_date)
-        if self._preferred in ("tushare", "indevs"):
+        if self._preferred == "tushare":
+            return self._tushare_source.get_moneyflow(ts_code, trade_date)
+        if self._preferred == "indevs":
             return self._indevs_source.get_moneyflow(ts_code, trade_date)
         return None
 
@@ -667,7 +724,9 @@ class CompositeDataSource:
             return self._a_stock_data_source.get_daily_basic(ts_code, start_date, end_date)
         if self._preferred == "auto":
             return self._auto_call("get_daily_basic", ts_code, start_date, end_date)
-        if self._preferred in ("tushare", "indevs"):
+        if self._preferred == "tushare":
+            return self._tushare_source.get_daily_basic(ts_code, start_date, end_date)
+        if self._preferred == "indevs":
             return self._indevs_source.get_daily_basic(ts_code, start_date, end_date)
         return None
 
@@ -678,7 +737,9 @@ class CompositeDataSource:
         if self._preferred == "auto":
             # a-stock-data 不支持该接口，_auto_call 回退后仍返回 None
             return self._auto_call("get_stk_factor", ts_code, start_date, end_date)
-        if self._preferred in ("tushare", "indevs"):
+        if self._preferred == "tushare":
+            return self._tushare_source.get_stk_factor(ts_code, start_date, end_date)
+        if self._preferred == "indevs":
             return self._indevs_source.get_stk_factor(ts_code, start_date, end_date)
         return None
 
@@ -688,7 +749,9 @@ class CompositeDataSource:
             return self._a_stock_data_source.get_stock_basic(ts_code, name)
         if self._preferred == "auto":
             return self._auto_call("get_stock_basic", ts_code, name)
-        if self._preferred in ("tushare", "indevs"):
+        if self._preferred == "tushare":
+            return self._tushare_source.get_stock_basic(ts_code, name)
+        if self._preferred == "indevs":
             return self._indevs_source.get_stock_basic(ts_code, name)
         return None
 
@@ -699,7 +762,9 @@ class CompositeDataSource:
         if self._preferred == "auto":
             # a-stock-data 不支持该接口，_auto_call 回退后仍返回 None
             return self._auto_call("get_trade_cal", exchange, start_date, end_date)
-        if self._preferred in ("tushare", "indevs"):
+        if self._preferred == "tushare":
+            return self._tushare_source.get_trade_cal(exchange, start_date, end_date)
+        if self._preferred == "indevs":
             return self._indevs_source.get_trade_cal(exchange, start_date, end_date)
         return None
 

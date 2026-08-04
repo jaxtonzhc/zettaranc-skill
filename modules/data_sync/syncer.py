@@ -11,6 +11,8 @@ import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from modules.core.errors import ZettarancError
+
 from ..database import get_connection, get_db_path
 from ..datasource import AStockDataDataSource, DataSource, IndevsDataSource, TushareDataSource
 from .rate_limiter import _rate_limit_global, _MAX_SYNC_WORKERS
@@ -40,16 +42,27 @@ class DataSyncer:
     def __init__(self, token: str | None = None, datasource: DataSource | None = None) -> None:
         self.token = token or os.environ.get("TUSHARE_TOKEN")
 
-        # 依赖注入 DataSource；默认按环境变量选择数据源（token 感知）
+        # 依赖注入 DataSource；默认按环境变量选择数据源（token 感知）。
+        # 注意：此处优先级与 CompositeDataSource._preferred_token_source 保持同步
+        # （indevs -> JNB 模式的 tushare -> a-stock-data 兜底），改动时需镜像。
         if datasource is None:
             # 优先 Indevs Replay API
             if os.environ.get("INDEVS_API_KEY"):
                 datasource = IndevsDataSource()
-            elif self.token:
-                # 配置了 TUSHARE_TOKEN（或显式传入 token）：保持 tushare 数据源，老用户行为不变
+            elif token is not None:
+                # 显式传入 token：用户明确要求 tushare（websearch 模式下其方法返回 None 由调用方处理）
                 datasource = TushareDataSource(token=self.token)
+            elif os.environ.get("DATA_MODE", "websearch") == "jnb" and self.token:
+                # JNB 模式配置了 TUSHARE_TOKEN：保持 tushare 数据源，老用户行为不变
+                try:
+                    datasource = TushareDataSource(token=self.token)
+                except ZettarancError as e:
+                    # JNB 配置不完整（缺 TUSHARE_API_URL 等）：回退免费源而非构造期崩溃
+                    logger.warning("[datasyncer] tushare 配置不完整(%s)，回退 a-stock-data", e)
+                    datasource = AStockDataDataSource()
             else:
-                # 零配置默认 a-stock-data（免费，无需 API Key）
+                # 零配置 / websearch 模式仅有环境变量 token（无数据后端）：
+                # 默认 a-stock-data（免费，无需 API Key），与父版本 auto 行为一致
                 datasource = AStockDataDataSource()
         self._datasource = datasource
         self._fetcher = DataFetcher(self._datasource)
@@ -665,8 +678,18 @@ class DataSyncer:
                             row_dict.get("sell_md_amount"),
                             row_dict.get("sell_lg_amount"),
                             row_dict.get("sell_elg_amount"),
-                            row_dict.get("net_mf"),
-                            row_dict.get("pct_mf"),
+                            # 三个数据源统一输出 tushare 官方列名 net_mf_amount/net_mf_rate；
+                            # 兼容旧 net_mf/pct_mf 命名
+                            (
+                                row_dict.get("net_mf_amount")
+                                if row_dict.get("net_mf_amount") is not None
+                                else row_dict.get("net_mf")
+                            ),
+                            (
+                                row_dict.get("net_mf_rate")
+                                if row_dict.get("net_mf_rate") is not None
+                                else row_dict.get("pct_mf")
+                            ),
                         )
                     )
 

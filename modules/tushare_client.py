@@ -116,6 +116,9 @@ class TushareClient:
         self, ts_code: str, start_date: str | None = None, end_date: str | None = None
     ) -> pd.DataFrame | None:
         """获取日线行情（个股，前复权）"""
+        if self._pro is None:
+            # websearch 模式无数据后端：返回 None 让上层回退（与 get_daily_basic 契约一致）
+            return None
         kwargs: dict[str, Any] = {"ts_code": ts_code, "adj": "qfq", "api": self._pro}
         if start_date:
             kwargs["start_date"] = start_date
@@ -129,6 +132,8 @@ class TushareClient:
 
     def get_index_daily(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
         """获取指数日线（如沪深300）"""
+        if self._pro is None:
+            return None
         return self._call_api_with_retry(
             "get_index_daily", self._pro.index_daily, ts_code=ts_code, start_date=start_date, end_date=end_date
         )
@@ -140,10 +145,14 @@ class TushareClient:
 
     def get_moneyflow(self, ts_code: str, trade_date: str) -> pd.DataFrame | None:
         """获取个股资金流向"""
+        if self._pro is None:
+            return None
         return self._call_api_with_retry("get_moneyflow", self._pro.moneyflow, ts_code=ts_code, trade_date=trade_date)
 
     def get_stock_basic(self, ts_code: str | None = None, name: str | None = None) -> pd.DataFrame | None:
         """获取股票基本信息"""
+        if self._pro is None:
+            return None
         params = {"list_status": "L"}
         if ts_code:
             params["ts_code"] = ts_code
@@ -153,20 +162,28 @@ class TushareClient:
 
     def get_limit_list(self, trade_date: str) -> pd.DataFrame | None:
         """获取涨跌停列表"""
+        if self._pro is None:
+            return None
         return self._call_api_with_retry("get_limit_list", self._pro.limit_list_d, trade_date=trade_date)
 
     def get_top_list(self, trade_date: str) -> pd.DataFrame | None:
         """获取龙虎榜数据"""
+        if self._pro is None:
+            return None
         return self._call_api_with_retry("get_top_list", self._pro.top_list, trade_date=trade_date)
 
     def get_financial_data(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
         """获取财务指标"""
+        if self._pro is None:
+            return None
         return self._call_api_with_retry(
             "get_financial_data", self._pro.fina_indicator, ts_code=ts_code, start_date=start_date, end_date=end_date
         )
 
     def get_trade_cal(self, exchange: str = "SSE", start_date: str = "", end_date: str = "") -> pd.DataFrame | None:
         """获取交易日历"""
+        if self._pro is None:
+            return None
         params = {"exchange": exchange}
         if start_date:
             params["start_date"] = start_date
