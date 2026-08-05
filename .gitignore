@@ -103,3 +103,13 @@ design-demos/
 rust/target/
 
 .venv312/
+
+# 浏览器自检缓存
+.playwright-mcp/
+
+# 仪表盘 / 截图测试产物
+dashboard*.png
+stock-analysis.png
+
+# 根目录 uv.lock（子包自有锁文件；2026-08-05 加入）
+/uv.lock
