@@ -40,6 +40,38 @@ def test_main_board_price_limit():
     assert "涨停" in c.reason
 
 
+def test_main_board_price_limits_use_half_up_rounding():
+    prev = DailyData(
+        ts_code="000001.SZ",
+        trade_date="20240101",
+        open=10.15,
+        high=10.15,
+        low=10.15,
+        close=10.15,
+        vol=1000,
+        amount=10150,
+        pct_chg=0,
+    )
+    kline = DailyData(
+        ts_code="000001.SZ",
+        trade_date="20240102",
+        open=10.15,
+        high=10.20,
+        low=10.10,
+        close=10.15,
+        vol=1000,
+        amount=10150,
+        pct_chg=0,
+    )
+
+    constraints = get_trade_constraints("000001.SZ", kline, prev)
+
+    # 10.15 × 0.9 = 9.135 → 交易所四舍五入到分 = 9.14；
+    # 浮点 round 会得 9.13（银行家舍入 + 浮点表示 9.134999...）。
+    assert constraints.price_floor == 9.14
+    assert constraints.price_limit == 11.17
+
+
 def test_kcb_20pct_limit():
     prev = DailyData(
         ts_code="688001.SH",
