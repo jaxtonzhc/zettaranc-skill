@@ -140,7 +140,12 @@ def _run_single_day(
     context: Any,
     config: SimulationConfig,
 ) -> None:
-    """执行单日的买入和卖出逻辑。"""
+    """执行单日的买入和卖出逻辑。
+
+    时点契约：candidates 由调用方（run_simulation）基于截至 date 前一交易日
+    收盘为止的 K 线生成，date 当天的收盘/成交量对信号不可见；本函数只负责
+    在 date（成交日）以当日开盘价执行买入、按当日约束与止损/止盈规则卖出。
+    """
 
     # ---------- 1. 先处理卖出 ----------
     remaining_positions: list[Position] = []
@@ -234,7 +239,8 @@ def _run_single_day(
             )
             continue
 
-        # 买入价：次日开盘价（当前日就是买入日，用当日 open）
+        # 买入价：成交日（T 日）开盘价——信号已在候选评估阶段截至 T-1 收盘
+        # （见 run_simulation 候选信号窗口），避免用 T 日自身数据决定 T 日开盘该不该买
         entry_price = current_kline.open
         stop_loss = _entry_stop_loss(sub_klines[:-1])
         take_profit = _entry_take_profit(entry_price, stop_loss, config.partial_take_profit_rr)
@@ -363,16 +369,26 @@ def run_simulation(
     for date in dates:
         context = market_contexts.get(date) or get_market_context(date, datasource=ds)
 
-        # 评估候选信号
+        # 评估候选信号：信号窗口截至成交日（date，即 T 日）前一交易日收盘为止，
+        # T 日自身的 K 线（收盘价/成交量/当日指标）不得参与信号评估——否则就是
+        # 用 T 日全天数据决定"T 日开盘该不该买"的未来函数（issue #25）。
+        # T 日仍然是成交日：候选信号在 T 日以开盘价成交（见 _run_single_day）。
         candidates: list[SignalScore] = []
         for code in ts_codes:
             stock_klines = klines_map.get(code)
             if not stock_klines:
                 continue
             sub = _klines_for_date(stock_klines, date)
-            if len(sub) < 60:
+            # 当日无 K 线（数据缺口/停牌当日未入库）则当日无法成交，不评估
+            if not sub or sub[-1].trade_date != date:
                 continue
-            sig = evaluate_stock(code, date, klines=sub, datasource=ds, config=config, context=context)
+            signal_window = sub[:-1]
+            if len(signal_window) < 60:
+                continue
+            signal_date = signal_window[-1].trade_date
+            sig = evaluate_stock(
+                code, signal_date, klines=signal_window, datasource=ds, config=config, context=context
+            )
             if sig.verdict == SignalVerdict.PASS:
                 candidates.append(sig)
 

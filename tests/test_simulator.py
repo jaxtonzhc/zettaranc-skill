@@ -985,3 +985,100 @@ def test_simulation_config_walk_forward_fields():
     config = SimulationConfig(walk_forward=True, wf_config=wf_config)
     assert config.walk_forward is True
     assert config.wf_config.train_days == 120
+
+
+class TestNextOpenFillTiming:
+    """回归测试（issue #25）：候选信号窗口必须截至成交日前一交易日，
+    成交日（T 日）自身的收盘价/成交量不得参与生成 T 日的买入信号，
+    最终仍以 T 日开盘价成交——否则就是未来函数：用当天全天数据决定
+    当天开盘该不该买。
+    """
+
+    _SENTINEL_VOL = 999999.0
+
+    @staticmethod
+    def _fake_evaluate_stock(code, trade_date, klines=None, datasource=None, config=None, context=None):
+        """伪造信号引擎：只有当传入窗口的最后一根 K 线成交量命中哨兵值时才判定 PASS。"""
+        triggered = bool(klines) and klines[-1].vol == TestNextOpenFillTiming._SENTINEL_VOL
+        return SignalScore(
+            ts_code=code,
+            name="测试股",
+            date=trade_date,
+            score=85.0 if triggered else 0.0,
+            b1_score=80.0,
+            trend_score=80.0,
+            volume_score=75.0,
+            risk_score=80.0,
+            signals=["B1", "沙漏完美"] if triggered else [],
+            reasons=["B1"],
+            warnings=[],
+            verdict=SignalVerdict.PASS if triggered else SignalVerdict.HIGH_RISK,
+        )
+
+    def _run(self, trigger_index: int):
+        """构造 65 根 K 线（保证任一回测日都有 >=60 日历史窗口），
+        只在 trigger_index（对整条 65 日序列的下标）处放置放量哨兵，
+        回测区间取最后 3 个交易日。"""
+        from modules.simulator.simulator import run_simulation
+
+        klines = _make_klines(n=65, start_price=100, trend=0.001)
+        klines[trigger_index].vol = self._SENTINEL_VOL
+        sim_dates = [k.trade_date for k in klines[-3:]]
+
+        mock_ds = MagicMock()
+        mock_ds.get_kline_dicts.return_value = [
+            {
+                "trade_date": d,
+                "open": 100.0,
+                "high": 102.0,
+                "low": 98.0,
+                "close": 101.0,
+                "vol": 10000.0,
+                "amount": 1010000.0,
+                "pct_chg": 1.0,
+            }
+            for d in sim_dates
+        ]
+        mock_ds.get_index_daily.return_value = MagicMock()
+        mock_ds.get_index_daily.return_value.empty = True
+
+        with (
+            patch("modules.simulator.simulator.get_datasource", return_value=mock_ds),
+            patch("modules.simulator.simulator.get_recent_klines", return_value=klines),
+            patch("modules.simulator.simulator.get_market_context") as mock_ctx,
+            patch("modules.simulator.simulator.evaluate_stock", side_effect=self._fake_evaluate_stock),
+        ):
+            mock_ctx.return_value = MarketContext(
+                date=sim_dates[0],
+                regime=MarketRegime.STRONG,
+                index_trend=70,
+                breadth=0.1,
+                moneyflow_score=60,
+            )
+            result = run_simulation(
+                ts_codes=["600519.SH"], days=3, config=SimulationConfig(), datasource=mock_ds
+            )
+        return result, klines, sim_dates
+
+    def test_signal_on_fill_day_own_bar_must_not_fill(self):
+        """反例：放量只出现在 T 日自身的 K 线上。旧代码用 T 日全天数据评估
+        T 日的信号，会在 T 日开盘直接买入——这正是未来函数。修复后 T 日自身
+        的量能不可见于 T 日的信号评估，不应产生任何买入。"""
+        result, _klines, sim_dates = self._run(trigger_index=-1)
+        fill_date = sim_dates[-1]
+        buys = [t for t in result.trades if t.action == "BUY" and t.date == fill_date]
+        assert buys == [], "T 日自身的收盘/成交量不应被用来生成 T 日的买入信号（未来函数）"
+
+    def test_signal_on_previous_close_fills_at_next_open(self):
+        """正例：放量出现在 T-1 日（成交日前一交易日）的 K 线上。信号应在
+        T-1 收盘后生成，于 T 日开盘价成交，entry_price 必须等于 T 日开盘价。"""
+        result, klines, sim_dates = self._run(trigger_index=-2)
+        fill_date = sim_dates[-1]
+        expected_open = klines[-1].open
+
+        buys = [t for t in result.trades if t.action == "BUY" and t.date == fill_date]
+        assert len(buys) == 1, "T-1 日收盘触发的信号必须在 T 日开盘成交"
+
+        entries = [p for p in result.positions if p.ts_code == "600519.SH"]
+        assert len(entries) == 1
+        assert entries[0].entry_price == expected_open
