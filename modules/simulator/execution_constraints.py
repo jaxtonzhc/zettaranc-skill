@@ -11,6 +11,7 @@ A 股交易约束层。
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..indicators import DailyData
 from ..constants import (
@@ -52,11 +53,18 @@ def _limit_pct(ts_code: str, is_st: bool) -> float:
 
 
 def _price_limits(prev_close: float, ts_code: str, is_st: bool) -> tuple[float, float]:
-    """基于上一交易日收盘价计算涨停价与跌停价。"""
-    pct = _limit_pct(ts_code, is_st)
-    limit = round(prev_close * (1 + pct), 2)
-    floor = round(prev_close * (1 - pct), 2)
-    return limit, floor
+    """基于上一交易日收盘价计算涨停价与跌停价。
+
+    交易所口径为四舍五入到分（ROUND_HALF_UP）；Python 内置 round 是
+    银行家舍入且受浮点表示影响，边界价会算错（如 10.15×0.9=9.135
+    浮点下 round 得 9.13，交易所实际跌停价为 9.14），因此用 Decimal。
+    """
+    price = Decimal(str(prev_close))
+    pct = Decimal(str(_limit_pct(ts_code, is_st)))
+    cent = Decimal("0.01")
+    limit = (price * (Decimal("1") + pct)).quantize(cent, rounding=ROUND_HALF_UP)
+    floor = (price * (Decimal("1") - pct)).quantize(cent, rounding=ROUND_HALF_UP)
+    return float(limit), float(floor)
 
 
 def _is_halted(kline: DailyData, prev_kline: DailyData | None) -> bool:
