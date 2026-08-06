@@ -298,7 +298,7 @@ def detect_sb1_detailed(klines: list[DailyData]) -> dict:
             # 简单判断：大阴线前的低点在抬高
             first_half = pre_lows[: len(pre_lows) // 2]
             second_half = pre_lows[len(pre_lows) // 2 :]
-            if min(second_half) < min(first_half):
+            if min(second_half) >= min(first_half):
                 result["is_sb1_detailed"] = True
 
     return result

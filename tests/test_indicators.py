@@ -35,6 +35,7 @@ from modules.indicators import (
     detect_b2_today,
     detect_breathing_structure,
     detect_sb1,
+    detect_sb1_detailed,
     detect_b3,
     detect_four_brick_system,
     calculate_sell_score,
@@ -580,6 +581,107 @@ class TestSB1B3:
         klines = make_klines(n=20)
         result = detect_b3(klines)
         assert "is_b3" in result
+
+
+# ========== detect_sb1_detailed（N型上涨方向回归，issue #24） ==========
+
+
+def make_sb1_detailed_klines(rising: bool):
+    """
+    构造满足 detect_sb1_detailed 全部前置条件（放量大阴线击穿止损位 + 缩量企稳
+    + J 值大负值 + 反转K线确认）的K线序列，仅大阴线前 10 根的低点结构（N型）
+    在 rising / falling 两种取值间切换：
+    - rising=True ：后半段最低点 >= 前半段最低点（低点抬高，正确的N型上涨结构）
+    - rising=False：后半段最低点 <  前半段最低点（低点走低，非N型上涨结构）
+    """
+    klines = []
+    price = 100.0
+    # 前置铺垫（5根），不参与大阴线前的低点窗口
+    for i in range(5):
+        c = price
+        o = price - 0.2
+        h = price + 0.3
+        low = price - 0.5
+        prev_close = klines[-1].close if klines else price
+        klines.append(
+            make_kline(price=c, vol=10000, pct_chg=(c - prev_close) / prev_close * 100,
+                       prev_close=prev_close, open=o, high=h, low=low, date=f"202601{i + 1:02d}")
+        )
+        price += 0.1
+
+    # 大阴线前 10 根的低点（first_half 最低点固定为 94）
+    first_half_lows = [95, 96, 94, 97, 95]
+    second_half_lows = [98, 99, 97, 100, 98] if rising else [93, 94, 92, 95, 93]
+    pre_lows = first_half_lows + second_half_lows
+
+    for i, lo in enumerate(pre_lows):
+        c = lo + 2.0
+        o = lo + 1.5
+        h = lo + 3.0
+        prev_close = klines[-1].close
+        klines.append(
+            make_kline(price=c, vol=9000, pct_chg=(c - prev_close) / prev_close * 100,
+                       prev_close=prev_close, open=o, high=h, low=lo, date=f"202602{i + 1:02d}")
+        )
+
+    # 放量大阴线（跌幅 -30%，量比 2 倍，击穿止损位）
+    prev_close = klines[-1].close
+    prev_vol = klines[-1].vol
+    drop_close = prev_close * 0.70
+    drop_open = prev_close * 0.995
+    drop_high = prev_close * 1.0
+    drop_low = drop_close * 0.97
+    drop_vol = prev_vol * 2.0
+    klines.append(
+        make_kline(price=drop_close, vol=drop_vol, pct_chg=(drop_close - prev_close) / prev_close * 100,
+                   prev_close=prev_close, open=drop_open, high=drop_high, low=drop_low, date="20260301")
+    )
+
+    # 大阴线后缩量企稳 2 天
+    for i, dpct in enumerate([-1.0, -0.5]):
+        prev_close = klines[-1].close
+        c = prev_close * (1 + dpct / 100)
+        o = prev_close * 1.001
+        h = max(o, c) * 1.005
+        low = min(o, c) * 0.97
+        vol = drop_vol * 0.5
+        klines.append(
+            make_kline(price=c, vol=vol, pct_chg=dpct, prev_close=prev_close, open=o, high=h, low=low,
+                       date=f"2026030{i + 2}")
+        )
+
+    # 反转K线确认（今日，小阳线）
+    prev_close = klines[-1].close
+    c = prev_close * 1.005
+    o = prev_close * 0.999
+    h = c * 1.005
+    low = o * 0.995
+    vol = drop_vol * 0.4
+    klines.append(
+        make_kline(price=c, vol=vol, pct_chg=(c - prev_close) / prev_close * 100,
+                   prev_close=prev_close, open=o, high=h, low=low, date="20260305")
+    )
+
+    return klines
+
+
+class TestSB1DetailedNShapeDirection:
+    """
+    回归测试（issue #24）：detect_sb1_detailed 中"大阴线前低点在抬高"的判断此前
+    方向写反了（`min(second_half) < min(first_half)` 在低点走低时置位），与函数
+    注释、语料口径相悖。修复后应为低点抬高（second_half 最低点 >= first_half 最
+    低点）时才置位 is_sb1_detailed。
+    """
+
+    def test_rising_lows_before_drop_sets_flag(self):
+        klines = make_sb1_detailed_klines(rising=True)
+        result = detect_sb1_detailed(klines)
+        assert result["is_sb1_detailed"] is True
+
+    def test_falling_lows_before_drop_does_not_set_flag(self):
+        klines = make_sb1_detailed_klines(rising=False)
+        result = detect_sb1_detailed(klines)
+        assert result["is_sb1_detailed"] is False
 
 
 # ========== analyze_stock ==========
