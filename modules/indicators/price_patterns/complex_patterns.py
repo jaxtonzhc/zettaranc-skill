@@ -467,7 +467,7 @@ def detect_zaihou_chongjian(klines: list[DailyData]) -> dict:
     条件：
     1. 前期有放量上涨（涨幅 > 5%，量 > 前5日均量 × 1.5）
     2. 近期缩量回调（量 < 放量日量的 60%）
-    3. 价格回踩黄线（大哥线 / 4参数BBI变体）附近（±2%）
+    3. 价格回踩黄线（大哥线 = (MA14+MA28+MA57+MA114)/4）附近（±2%）
     4. 黄线趋势向上
 
     Args:
@@ -476,31 +476,31 @@ def detect_zaihou_chongjian(klines: list[DailyData]) -> dict:
     Returns:
         {'is_rebuild': bool, 'confidence': float, 'desc': str}
     """
-    if len(klines) < 60:
+    if len(klines) < 114:
         return {"is_rebuild": False}
 
     today = klines[-1]
 
-    # 计算黄线（4参数BBI变体）
+    # 计算黄线（大哥线 = (MA14+MA28+MA57+MA114)/4，与 calculate_dg_yellow 一致）
     closes = [k.close for k in klines]
-    ma3 = calculate_ma(closes, 3)
-    ma6 = calculate_ma(closes, 6)
-    ma12 = calculate_ma(closes, 12)
-    ma24 = calculate_ma(closes, 24)
-    yellow_line = (ma3 + ma6 + ma12 + ma24) / 4
+    ma14 = calculate_ma(closes, 14)
+    ma28 = calculate_ma(closes, 28)
+    ma57 = calculate_ma(closes, 57)
+    ma114 = calculate_ma(closes, 114)
+    yellow_line = (ma14 + ma28 + ma57 + ma114) / 4
 
-    # 黄线趋势：近5天黄线 vs 近10天黄线
+    # 黄线趋势：近5天黄线 vs 近10天黄线（大哥线公式）
     yellow_5 = (
-        calculate_ma(closes[-5:], 3)
-        + calculate_ma(closes[-5:], 6)
-        + calculate_ma(closes[-5:], 12)
-        + calculate_ma(closes[-5:], 24)
+        calculate_ma(closes[-5:], 14)
+        + calculate_ma(closes[-5:], 28)
+        + calculate_ma(closes[-5:], 57)
+        + calculate_ma(closes[-5:], 114)
     ) / 4
     yellow_10 = (
-        calculate_ma(closes[-10:], 3)
-        + calculate_ma(closes[-10:], 6)
-        + calculate_ma(closes[-10:], 12)
-        + calculate_ma(closes[-10:], 24)
+        calculate_ma(closes[-10:], 14)
+        + calculate_ma(closes[-10:], 28)
+        + calculate_ma(closes[-10:], 57)
+        + calculate_ma(closes[-10:], 114)
     ) / 4
     yellow_up = yellow_5 > yellow_10
 
