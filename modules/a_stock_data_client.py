@@ -19,7 +19,9 @@ A-Stock-Data 免费数据源客户端
 from __future__ import annotations
 
 import logging
+import json
 import random
+import re
 import time
 import urllib.request
 from datetime import datetime, timedelta
@@ -81,6 +83,10 @@ def _get_prefix(code: str) -> str:
 
 _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 _DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_PUSH2_URL = "https://push2.eastmoney.com/api/qt/clist/get"
+
+# 东财全量 A 股列表过滤条件：深主板 + 创业板 + 沪主板 + 科创板
+_EM_STOCK_LIST_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
 
 _EM_SESSION = requests.Session()
 _EM_SESSION.headers.update({"User-Agent": _UA})
@@ -481,6 +487,170 @@ def _mootdx_kline(code: str, days: int = 60, frequency: int = 9) -> pd.DataFrame
         return None
 
 
+def _th_daily(ts_code: str, retries: int = 2) -> pd.DataFrame | None:
+    """同花顺日 K（d.10jqka.com.cn/v6/line/hs_{code}/01/last.js，最近约 140 天）。
+
+    需 Referer 头，偶发超时重试；按 ';' 分记录、',' 分字段（last.js 格式）。
+    """
+    code = _ts_code_to_6digit(ts_code)
+    if not code:
+        return None
+    url = f"https://d.10jqka.com.cn/v6/line/hs_{code}/01/last.js"
+    headers = {"User-Agent": _UA, "Referer": "http://stockpage.10jqka.com.cn/"}
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            body = resp.text
+            payload = json.loads(body[body.index("(") + 1 : body.rindex(")")])
+            records = [seg.split(",") for seg in payload["data"].split(";") if seg]
+            recs = [r[:7] for r in records if r and re.fullmatch(r"\d{8}", r[0])]
+            if not recs:
+                raise ValueError("no kline records")
+            df = pd.DataFrame(recs, columns=["trade_date", "open", "high", "low", "close", "vol", "amount"])
+            for col in df.columns[1:]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=["close"])
+            df = df.sort_values("trade_date").reset_index(drop=True)
+            df["ts_code"] = ts_code
+            df["pct_chg"] = (df["close"].pct_change() * 100).fillna(0.0)
+            return df
+        except Exception:
+            if attempt == retries - 1:
+                logger.debug("[a-stock-data] 同花顺日K失败 %s", ts_code)
+                return None
+            time.sleep(1 + attempt)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 全量股票列表（东财优先，新浪兜底）
+# ---------------------------------------------------------------------------
+
+
+def _market_label(code: str, market_code: int | str) -> str:
+    """6 位代码 + 东财市场码 -> 板块标签（主板/创业板/科创板）"""
+    if str(market_code) == "1":
+        return "科创板" if code.startswith("688") else "主板"
+    return "创业板" if code.startswith(("300", "301")) else "主板"
+
+
+def eastmoney_stock_list(page_size: int = 1000) -> list[dict]:
+    """东财全量 A 股列表（沪深主板 + 创业板 + 科创板），分页拉取。
+
+    返回: [{ts_code, name, industry, market}, ...]
+    """
+    result: list[dict] = []
+    total: int | None = None
+    page = 1
+    while True:
+        params = {
+            "pn": page,
+            "pz": page_size,
+            "po": 1,
+            "np": 1,
+            "fltt": 2,
+            "invt": 2,
+            "fid": "f12",
+            "fs": _EM_STOCK_LIST_FS,
+            "fields": "f12,f13,f14,f100",
+        }
+        r = _em_get(_PUSH2_URL, params=params, timeout=15)
+        if r is None:
+            break
+        try:
+            d = r.json()
+        except ValueError:
+            break
+        data = d.get("data") or {}
+        diff = data.get("diff") or []
+        if total is None:
+            total = data.get("total") or 0
+        if not diff:
+            break
+        for item in diff:
+            code = str(item.get("f12", ""))
+            market_code = item.get("f13")
+            if not code:
+                continue
+            if str(market_code) == "1":
+                ts_code = f"{code}.SH"
+            else:
+                ts_code = f"{code}.SZ"
+            result.append(
+                {
+                    "ts_code": ts_code,
+                    "name": str(item.get("f14", "")),
+                    "industry": str(item.get("f100", "") or ""),
+                    "market": _market_label(code, market_code),
+                }
+            )
+        page += 1
+        if total and len(result) >= total:
+            break
+        if page > 15:
+            break
+    return result
+
+
+def sina_stock_list(page_size: int = 80) -> list[dict]:
+    """新浪全量 A 股列表（东财不可用时兜底，无行业字段），分页拉取。"""
+    url = (
+        "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+        "Market_Center.getHQNodeData"
+    )
+    result: list[dict] = []
+    page = 1
+    while True:
+        params = {
+            "page": page,
+            "num": page_size,
+            "sort": "symbol",
+            "asc": 1,
+            "node": "hs_a",
+            "symbol": "",
+            "_s_r_a": "init",
+        }
+        data = None
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, params=params, timeout=15, headers={"User-Agent": _UA})
+                data = resp.json()
+                break
+            except (requests.RequestException, ValueError):
+                if attempt == 2:
+                    break
+                time.sleep(2 * (attempt + 1))
+        if not data:
+            break
+        for item in data:
+            symbol = str(item.get("symbol", ""))
+            if len(symbol) < 8:
+                continue
+            prefix, code = symbol[:2], symbol[2:]
+            if prefix == "bj":
+                continue
+            if prefix == "sh":
+                ts_code = f"{code}.SH"
+            else:
+                ts_code = f"{code}.SZ"
+            result.append(
+                {
+                    "ts_code": ts_code,
+                    "name": str(item.get("name", "")),
+                    "industry": "",
+                    "market": _market_label(code, 1 if prefix == "sh" else 0),
+                }
+            )
+        page += 1
+        if len(data) < page_size:
+            break
+        if page > 100:
+            break
+        time.sleep(0.3)  # 新浪对高频请求敏感，页间限流防封
+    return result
+
+
 # ---------------------------------------------------------------------------
 # AStockDataClient — 实现 DataSource Protocol 接口
 # ---------------------------------------------------------------------------
@@ -547,7 +717,21 @@ class AStockDataClient:
         except Exception as e:
             logger.debug("[a-stock-data] 百度 K 线失败 %s: %s, 尝试 mootdx", ts_code, e)
 
-        # 2. 回退到 mootdx (通达信 TCP)
+        # 2. 回退到同花顺日 K（最近约 140 天，全市场扫描快）
+        self._rate_limit()
+        try:
+            df = _th_daily(ts_code, retries=2)
+            if df is not None and not df.empty:
+                if start_date and "trade_date" in df.columns:
+                    df = df[df["trade_date"] >= start_date]
+                if end_date and "trade_date" in df.columns:
+                    df = df[df["trade_date"] <= end_date]
+                if not df.empty:
+                    return df
+        except Exception as e:
+            logger.debug("[a-stock-data] 同花顺 K 线失败 %s: %s, 尝试 mootdx", ts_code, e)
+
+        # 3. 回退到 mootdx (通达信 TCP)
         self._rate_limit()
         try:
             df = _mootdx_kline(code, days=500)
@@ -758,8 +942,14 @@ class AStockDataClient:
         return None
 
     def get_stock_list(self, exchange: str | None = None) -> list[dict]:
-        """获取股票列表 — a-stock-data 不提供全量列表，返回空"""
-        return []
+        """获取全量 A 股列表（沪深主板 + 创业板 + 科创板）。
+
+        东财优先（含行业字段），东财不可用时回退新浪。
+        """
+        stocks = eastmoney_stock_list()
+        if stocks:
+            return stocks
+        return sina_stock_list()
 
     def get_kline_dicts(
         self,

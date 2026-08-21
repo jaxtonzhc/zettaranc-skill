@@ -26,6 +26,7 @@ class ScreenResponse(BaseModel):
     strategy: str
     criteria: str
     count: int
+    matched: int = 0
     stocks: list[StockScoreItem] = []
 
 

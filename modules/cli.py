@@ -287,13 +287,14 @@ def cmd_screen(args) -> None:
     # `rust_screen = compute_func("screen_stocks_py")`
     # 若 rust_screen 不为 None 即可走 Rust。
 
+    # ponytail: --limit 只裁剪输出数量；扫描始终走引擎保护上限（max_stocks=0）
     results = screen_stocks(
         criteria=criteria,
-        max_stocks=args.limit if args.limit > 0 else 0,
+        max_stocks=0,
         use_parallel=not args.no_parallel,
     )
 
-    # 输出前 limit 只（limit=0 时输出全部 500 上限内的命中）
+    # 输出前 limit 只（limit=0 时输出全部命中）
     output_limit = args.limit if args.limit > 0 else len(results)
 
     # ── JSON 输出 ──
@@ -691,7 +692,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ── screen ──
     p_screen = subparsers.add_parser("screen", help="批量选股（11 种策略）")
     p_screen.add_argument("--strategy", choices=STRATEGY_CHOICES, default="B1", help="筛选策略（11 种别名）")
-    p_screen.add_argument("--limit", type=int, default=20, help="输出数量（0=全市场 500 上限）")
+    p_screen.add_argument("--limit", type=int, default=20, help="返回数量（0=返回全部命中；扫描始终走引擎保护上限）")
     p_screen.add_argument("--no-parallel", action="store_true", help="禁用多进程并行")
     p_screen.add_argument("--json", action="store_true", help="JSON输出")
 

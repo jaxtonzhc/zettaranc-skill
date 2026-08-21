@@ -9,6 +9,7 @@ import ScoreCard from '../components/stock/ScoreCard';
 import SignalTimeline from '../components/stock/SignalTimeline';
 import DiagnosisCard from '../components/stock/DiagnosisCard';
 import CommentaryCard from '../components/stock/CommentaryCard';
+import VerdictBanner from '../components/stock/VerdictBanner';
 import { formatNumber, formatPct, pctColor } from '../lib/formatters';
 
 export default function StockAnalysis() {
@@ -75,6 +76,9 @@ export default function StockAnalysis() {
           </div>
         </div>
       </div>
+
+      {/* ============ 买点裁决 - 统一结论 ============ */}
+      {analysis.verdict && <VerdictBanner verdict={analysis.verdict} />}
 
       {/* ============ K 线图 - 全宽 ============ */}
       <Card title="K 线图 · 白线/黄线 · KDJ · MACD · 砖型图">

@@ -13,9 +13,13 @@ def get_full_analysis(ts_code: str, days: int = 120) -> dict[str, Any]:
     """
     from modules.indicators import analyze_stock, detect_three_waves, detect_kirin_stage
     from modules.indicators.data_layer import get_kline_data, DailyData
+    from modules.datasource import get_datasource
     from modules.strategies import detect_all_strategies
     from modules.portfolio_diagnosis import diagnose_stock
     from modules.screener import analyze_stock as screener_analyze
+
+    # 0. 先确保 K 线已缓存（DB 优先，没有则拉取写回），避免首次访问时指标全零
+    get_datasource().get_kline_dicts(ts_code, days=max(days + 80, 200))
 
     # 1. 指标分析
     result = analyze_stock(ts_code, days=days)
@@ -64,7 +68,7 @@ def get_full_analysis(ts_code: str, days: int = 120) -> dict[str, Any]:
     score = screener_analyze(ts_code)
 
     # ── 组装响应 ──
-    return {
+    result = {
         "ts_code": ts_code,
         "name": getattr(diagnosis, "name", ts_code),
         "price": getattr(diagnosis, "price", 0),
@@ -78,11 +82,103 @@ def get_full_analysis(ts_code: str, days: int = 120) -> dict[str, Any]:
         "score": _build_score(score),
         "diagnosis": _build_diagnosis(diagnosis),
     }
+    # 统一买点裁决（把信号/诊断/牛绳/砖形图合成一个明确结论）
+    result["verdict"] = _build_verdict(result)
+    return result
+
+
+def _build_verdict(analysis: dict[str, Any]) -> dict[str, Any]:
+    """统一买点裁决：把战法信号、诊断、牛绳、砖形图、风险合成一个明确结论。
+
+    优先级（纪律 > 机会）：
+    1. 硬否决（不买）：MACD 一票否决 / 当日 CRITICAL 卖出信号 / 牛绳断（白线<黄线）/
+       砖形图绿砖未完（下跌结构未结束）
+    2. 待确认：有 BUY 信号但存在软警示（高位/风险 HIGH 等），需等确认动作
+    3. 可买：BUY 信号 + 牛绳完好 + 无卖出信号 + 无硬风险
+    """
+    ind = analysis.get("indicators") or {}
+    macd = ind.get("macd") or {}
+    dl = ind.get("double_line") or {}
+    brick = ind.get("brick") or {}
+    diag = analysis.get("diagnosis") or {}
+    signals = analysis.get("signals") or []
+    today = analysis.get("trade_date") or ""
+
+    today_sigs = [s for s in signals if s.get("date") == today]
+    buy_sigs = [s for s in today_sigs if s.get("action") == "BUY"]
+    sell_sigs = [s for s in today_sigs if s.get("action") == "SELL"]
+
+    # 1. 硬否决：MACD 一票否决
+    if macd.get("veto"):
+        return {
+            "state": "不买",
+            "reason": "MACD 一票否决：DIF 在零轴下方，任何反弹按反抽处理",
+            "conditions": ["等 DIF 翻上零轴"],
+            "action": "不买入",
+        }
+
+    # 2. 硬否决：当日出现卖出信号（含四块砖翻绿/S1/S3/假突破等）
+    if sell_sigs:
+        names = "、".join(s["strategy"] for s in sell_sigs[:3])
+        return {
+            "state": "不买",
+            "reason": f"当日出现卖出信号：{names}",
+            "conditions": ["卖出信号解除后再评估"],
+            "action": "不买入",
+        }
+
+    # 3. 结构检查：牛绳 + 砖形图（纪律项，优先于机会信号）
+    reasons: list[str] = []
+    hard_reasons: list[str] = []
+    conditions: list[str] = []
+    white, yellow = dl.get("white"), dl.get("yellow")
+    if white and yellow and white < yellow:
+        hard_reasons.append(f"牛绳断（白线{white:.2f} < 黄线{yellow:.2f}）：趋势结构破坏")
+        conditions.append("白线上穿黄线（牛绳修复）")
+    brick_trend = str(brick.get("trend") or "").upper()
+    brick_count = brick.get("count") or 0
+    if brick_trend == "GREEN" and brick_count >= 3:
+        hard_reasons.append(f"砖形图绿砖{brick_count}块，下跌结构未完")
+        conditions.append("砖形图连续 2 块红砖")
+    risk = (diag.get("risk_level") or "").upper()
+    if risk == "HIGH":
+        reasons.append("风险等级 HIGH")
+        conditions.append("风险等级降为 MEDIUM 以下")
+
+    if not buy_sigs:
+        return {
+            "state": "观望",
+            "reason": "当日无买入信号",
+            "conditions": ["等待 B1 / B2 / 建仓波等买点信号出现"],
+            "action": "不买入",
+        }
+
+    if hard_reasons:
+        return {
+            "state": "不买",
+            "reason": "；".join(hard_reasons),
+            "conditions": conditions or ["等结构修复"],
+            "action": "等修复后再评估",
+        }
+
+    if reasons:
+        return {
+            "state": "待确认",
+            "reason": "；".join(reasons),
+            "conditions": conditions + ["翻红不创新低 / 放量收复均线 / 金叉后多等一天"],
+            "action": "出现确认动作再轻仓试错",
+        }
+
+    return {
+        "state": "可买",
+        "reason": "买点信号 + 牛绳完好 + 无硬风险",
+        "conditions": ["带止损分批进场（单票≤10%，防守市≤5%）"],
+        "action": "可考虑买入",
+    }
 
 
 def get_kline_chart_data(ts_code: str, days: int = 120) -> dict[str, Any]:
     """获取 K 线图表数据（ECharts 列式格式）"""
-    from modules.indicators.data_layer import get_kline_data
     from modules.indicators.core import (
         calculate_ma, calculate_bbi, calculate_bollinger,
         calculate_kdj, calculate_macd,
@@ -91,11 +187,13 @@ def get_kline_chart_data(ts_code: str, days: int = 120) -> dict[str, Any]:
         calculate_zg_white, calculate_dg_yellow,
     )
     from modules.strategies import detect_all_strategies
+    from modules.datasource import dict_to_daily, get_datasource
 
     # 多取历史数据用于指标计算（黄线需要 114 天 MA114）
     # 展示最近 days 天，但用更多历史数据计算指标
     extra_days = max(days + 130, 250)
-    all_klines = get_kline_data(ts_code, days=extra_days)
+    # DB 优先：本地没有 K 线时自动从数据源拉取并写回缓存（与 screener/simulator 一致）
+    all_klines = dict_to_daily(get_datasource().get_kline_dicts(ts_code, days=extra_days))
     if not all_klines:
         return {"ts_code": ts_code, "dates": [], "ohlc": [], "volumes": [],
                 "pct_chgs": [], "overlays": {}, "signal_markers": [],

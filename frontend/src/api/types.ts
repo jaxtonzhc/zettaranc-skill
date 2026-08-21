@@ -20,6 +20,12 @@ export interface StockAnalysis {
   signals: StrategySignal[];
   score: ScoreDetail;
   diagnosis: DiagnosisSummary;
+  verdict: {
+    state: string;
+    reason: string;
+    conditions: string[];
+    action: string;
+  };
 }
 
 export interface IndicatorDetail {

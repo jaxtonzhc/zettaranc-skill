@@ -128,8 +128,8 @@ def test_screen_parser_accepts_all_strategies(chinese_name, fake_screen_result, 
     # 3. use_parallel 应该是 False（因为传了 --no-parallel）
     assert call_kwargs["use_parallel"] is False
 
-    # 4. max_stocks 应该是 5（不是 args.limit 默认 20）
-    assert call_kwargs["max_stocks"] == 5
+    # 4. max_stocks 固定为 0（扫描走引擎保护上限；--limit 只裁剪输出）
+    assert call_kwargs["max_stocks"] == 0
 
     # 5. 输出包含 ts_code + score + rating
     out = capsys.readouterr().out
@@ -160,11 +160,11 @@ def test_screen_calls_screen_stocks_not_self_loop(fake_screen_result, capsys):
     )
 
 
-def test_screen_limit_zero_means_full_market(fake_screen_result, capsys):
-    """--limit 0 表示扫全市场（pass max_stocks=0 给 screen_stocks）"""
+def test_screen_limit_does_not_cap_scan_pool(fake_screen_result, capsys):
+    """--limit 只裁剪输出，不作为扫描池上限"""
     from modules.cli import main
 
-    test_args = ["zt", "screen", "--strategy", "B1", "--limit", "0", "--no-parallel"]
+    test_args = ["zt", "screen", "--strategy", "B1", "--limit", "5", "--no-parallel"]
 
     with (
         patch.object(sys, "argv", test_args),
@@ -173,7 +173,7 @@ def test_screen_limit_zero_means_full_market(fake_screen_result, capsys):
         main()
 
     call_kwargs = mock_screen.call_args.kwargs
-    assert call_kwargs["max_stocks"] == 0, "limit=0 必须透传给 max_stocks=0"
+    assert call_kwargs["max_stocks"] == 0, "扫描必须走 max_stocks=0，不能被 --limit 截断"
 
 
 # ==================== cmd_watchlist scan 修复验证 ====================

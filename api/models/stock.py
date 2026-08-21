@@ -110,6 +110,15 @@ class ScoreDetail(BaseModel):
     warnings: list[str] = []
 
 
+class Verdict(BaseModel):
+    """统一买点裁决：可买 / 待确认 / 不买 / 观望"""
+
+    state: str = "观望"
+    reason: str = ""
+    conditions: list[str] = []
+    action: str = ""
+
+
 # ── 诊断摘要 ──
 
 class DiagnosisSummary(BaseModel):
@@ -155,6 +164,7 @@ class StockAnalysisResponse(BaseModel):
     signals: list[StrategySignalResponse] = []
     score: ScoreDetail = ScoreDetail()
     diagnosis: DiagnosisSummary = DiagnosisSummary()
+    verdict: Verdict = Verdict()
 
 
 # ── K 线图表数据 ──

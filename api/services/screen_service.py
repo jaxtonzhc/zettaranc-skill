@@ -43,13 +43,18 @@ def get_strategies() -> list[dict]:
 
 
 def run_screen(strategy: str, limit: int = 20, use_parallel: bool = True) -> dict:
-    """执行选股筛选"""
+    """执行选股筛选。
+
+    limit 只控制返回数量，不截断扫描池。
+    扫描范围交给 screen_stocks(max_stocks=0) 的引擎保护上限。
+    """
     from modules.screener import screen_stocks
 
     criteria = STRATEGY_ALIAS.get(strategy, strategy.lower())
+    # ponytail: limit 是结果数，不是扫描数；扫描走引擎默认全量保护上限
     scores = screen_stocks(
         criteria=criteria,
-        max_stocks=limit,
+        max_stocks=0,
         use_parallel=use_parallel,
     )
 
@@ -72,5 +77,6 @@ def run_screen(strategy: str, limit: int = 20, use_parallel: bool = True) -> dic
         "strategy": strategy,
         "criteria": criteria,
         "count": len(stocks),
+        "matched": len(scores),
         "stocks": stocks,
     }
